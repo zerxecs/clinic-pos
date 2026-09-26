@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node src/server.js",
     "migrate": "node src/migrate.js",
-    "bootstrap:admin": "node src/bootstrap-admin.js"
+    "bootstrap:admin": "node src/bootstrap-admin.js",
+    "test": "node --test"
   },
   "dependencies": {
     "argon2": "^0.41.1",

@@ -23,3 +23,13 @@ JSON REST API under `/api/v1`; request validation at the boundary, stable error 
 - Responses include receipt number, timestamp, cashier, currency, subtotal/discount/tax/total, item SKU/name/quantity/unit price/line total, tender method/amount/reference/status, and change due where applicable. `GET /sales` supports paginated history filters; `GET /sales/{id}` returns receipt details; `POST /sales/{id}/void` records compensating entries while preserving original history.
 
 Cashier can search products, read sellable availability, create sales, and read permitted sales history. Admin can manage catalog/prices, suppliers, stock, users/roles, and reports. Error responses include `code`, `message`, `request_id`; stock conflicts use HTTP 409.
+
+
+## Inventory, reports, and payment validation
+
+- Product search responses include qty_on_hand, qty_sellable, and a lots array for lots with positive on-hand quantity. Each lot entry contains its ID/code, expiry date, on-hand quantity, active flag, and computed is_sellable flag.
+- Admin-only GET /inventory/movements returns movement, product, lot, reference, actor, reason, and timestamp fields. Optional filters are product_id, lot_id, movement_type, from, and to (ISO dates); limit and offset paginate results.
+- Admin-only GET /reports/sales accepts ISO date from/to (defaults to the last 30 days; maximum 366 days) and returns per-currency completed/voided counts and completed totals plus completed sales grouped by day and currency.
+- Admin-only GET /reports/stock returns per-product on-hand, sellable, expired, expiring-soon, lot-count, and cost-value totals. Optional expiring_days defaults to 30 and is bounded to 0?365.
+- Admin sees all receipt metadata from GET /sales; a Cashier sees only their own. The detail endpoint continues to enforce the same ownership rule.
+- Tender objects accept only method, amount (positive, at most two decimal places), and optional reference. Payment status is server-owned: client-supplied status/outcome fields such as FAILED are rejected with HTTP 400 before the transaction starts. Payment totals are checked before sale, inventory, or payment writes; database failures during checkout roll the transaction back.
