@@ -1,0 +1,22 @@
+{
+  "name": "clinic-pos-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "migrate": "node src/migrate.js",
+    "bootstrap:admin": "node src/bootstrap-admin.js"
+  },
+  "dependencies": {
+    "argon2": "^0.41.1",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "jose": "^6.0.8",
+    "pg": "^8.13.3",
+    "zod": "^3.24.2"
+  }
+}
