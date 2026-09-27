@@ -13,12 +13,16 @@ export function assertCartQuantity(quantity, available) {
 }
 
 export function assertTenderTotal(payments, total) {
-  if (!payments.length || payments.some(payment => !Number.isFinite(payment.amount) || payment.amount <= 0)) {
+  if (!payments.length || payments.some(payment => (
+    !Number.isFinite(payment.amount) || payment.amount <= 0
+  ))) {
     throw new Error('Enter a payment amount greater than zero for each tender.');
   }
   const paidCents = payments.reduce((sum, payment) => sum + decimalCents(payment.amount), 0);
   const totalCents = decimalCents(total);
-  const singleCashOverpayment = payments.length === 1 && payments[0].method === 'CASH' && paidCents >= totalCents;
+  const singleCashOverpayment = payments.length === 1
+    && payments[0].method === 'CASH'
+    && paidCents >= totalCents;
   if (paidCents !== totalCents && !singleCashOverpayment) {
     throw new Error('Cash received must cover the total due. Other tender amounts must equal the total.');
   }
@@ -35,8 +39,16 @@ function decimalCents(value) {
 export function cashChangePreview(tendered, total) {
   const tenderedCents = decimalCents(tendered);
   const totalCents = decimalCents(total);
-  if (!Number.isSafeInteger(tenderedCents) || !Number.isSafeInteger(totalCents) || tenderedCents < 0) return { sufficient: false, changeCents: 0 };
-  return { sufficient: tenderedCents >= totalCents, changeCents: Math.max(0, tenderedCents - totalCents) };
+  if (!Number.isSafeInteger(tenderedCents)
+    || !Number.isSafeInteger(totalCents)
+    || tenderedCents < 0) {
+    return { sufficient: false, changeCents: 0 };
+  }
+
+  return {
+    sufficient: tenderedCents >= totalCents,
+    changeCents: Math.max(0, tenderedCents - totalCents),
+  };
 }
 
 export function beginCheckout(state) {
