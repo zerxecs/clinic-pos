@@ -53,6 +53,9 @@ test('product response limits lot details to Admin while preserving cashier tota
  assert.match(server,/const isAdmin=req\.user\.roles\.includes\('ADMIN'\);/);
  assert.match(server,/shapeProductRows\(rows,isAdmin\)/);
  assert.match(server,/CASE WHEN p\.item_type='SERVICE' THEN 100000 ELSE COALESCE\(sum\(l\.qty_on_hand\) FILTER\(WHERE l\.is_active AND \(l\.expires_on IS NULL OR l\.expires_on>=current_date\)\),0\) END qty_sellable/);
+ const stockReport=server.match(/app\.get\('\/api\/v1\/reports\/stock',[\s\S]*?\n\}\);/)[0];
+ assert.match(stockReport,/CASE WHEN p\.item_type='SERVICE' THEN 100000 ELSE COALESCE\(sum\(l\.qty_on_hand\) FILTER\(WHERE l\.is_active AND \(l\.expires_on IS NULL OR l\.expires_on>=current_date\)\),0\) END qty_sellable,/);
+ assert.doesNotMatch(stockReport,/\) qty_sellable END qty_sellable/);
  const sample={id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',item_type:'PRODUCT',is_active:true,price:'12.50',currency:'PHP',qty_on_hand:'8',qty_sellable:'5',qty_expiring_soon:'2',lots:[{lot_id:'lot-secret',lot_code:'BATCH-SECRET',expires_on:'2026-10-01',qty_on_hand:'2',is_active:true,is_sellable:true}]};
  const [cashier]=shapeProductRows([sample],false);
  assert.deepEqual(cashier,{id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',item_type:'PRODUCT',price:'12.50',currency:'PHP',qty_sellable:'5',expiry_warning:true});
