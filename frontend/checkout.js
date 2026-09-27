@@ -1,5 +1,5 @@
 export function isSellableProduct(product) {
-  return Number(product?.qty_sellable) > 0;
+  return product?.item_type === 'SERVICE' || Number(product?.qty_sellable) > 0;
 }
 
 export function assertCartQuantity(quantity, available) {

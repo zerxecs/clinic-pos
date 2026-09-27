@@ -13,6 +13,7 @@ test('checkout rejects invalid, excess, and unavailable product quantities', () 
   assert.throws(() => assertCartQuantity(4, 3), /Only 3 available/);
   assert.equal(isSellableProduct({ qty_sellable: 0 }), false);
   assert.equal(isSellableProduct({ qty_sellable: '2' }), true);
+  assert.equal(isSellableProduct({ item_type: 'SERVICE', qty_sellable: 0 }), true);
 });
 
 test('checkout rejects empty, invalid, or mismatched tender amounts', () => {

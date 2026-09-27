@@ -26,8 +26,8 @@ const request = async (path, { token = cashierToken, method = 'GET', body, heade
   return { status: response.status, body: await response.json() };
 };
 
-async function createProduct(stockLots) {
-  const product = await request('/api/v1/products', { token: adminToken, method: 'POST', body: { sku: `IT-${randomUUID()}`, name: 'Integration fixture', unit: 'each', price: 10, currency: 'PHP' } });
+async function createProduct(stockLots, options={}) {
+  const product = await request('/api/v1/products', { token: adminToken, method: 'POST', body: { sku: `IT-${randomUUID()}`, name: options.name??'Integration fixture', unit: 'each', item_type:options.item_type??'PRODUCT', price: options.price??10, currency: 'PHP', tax_classification:options.tax_classification??'NON_VAT',sc_discount_eligible:Boolean(options.sc_discount_eligible),pwd_discount_eligible:Boolean(options.pwd_discount_eligible) } });
   assert.equal(product.status, 200);
   productIds.push(product.body.id);
   const lotIds = [];
@@ -79,6 +79,8 @@ describe('isolated PostgreSQL sales and inventory transaction behavior', { skip:
     };
     adminToken = await login((await pool.query('SELECT username FROM app_user WHERE id=$1', [adminId])).rows[0].username);
     cashierToken = await login((await pool.query('SELECT username FROM app_user WHERE id=$1', [cashierId])).rows[0].username);
+    const config=await request('/api/v1/tax-configuration',{token:adminToken,method:'PUT',body:{registration_type:'NON_VAT',vat_rate_basis_points:0,pricing_mode:'INCLUSIVE',registered_name:'Test Clinic',tin:'TEST-TIN',registered_address:'Local test database',effective_from:new Date().toISOString().slice(0,10)}});
+    assert.equal(config.status,200);
   });
 
   after(async () => {
@@ -99,6 +101,7 @@ describe('isolated PostgreSQL sales and inventory transaction behavior', { skip:
       await pool.query('DELETE FROM product_price WHERE product_id=ANY($1::uuid[])', [productIds]);
       await pool.query('DELETE FROM product WHERE id=ANY($1::uuid[])', [productIds]);
     }
+    await pool.query('UPDATE tax_configuration SET updated_by=NULL WHERE updated_by=ANY($1::uuid[])', [[adminId, cashierId].filter(Boolean)]);
     await pool.query('DELETE FROM user_role WHERE user_id=ANY($1::uuid[])', [[adminId, cashierId].filter(Boolean)]);
     await pool.query('DELETE FROM app_user WHERE id=ANY($1::uuid[])', [[adminId, cashierId].filter(Boolean)]);
     await pool.end();
@@ -108,6 +111,21 @@ describe('isolated PostgreSQL sales and inventory transaction behavior', { skip:
     const result = await request('/api/v1/inventory/lots');
     assert.equal(result.status, 403);
     assert.equal(result.body.code, 'FORBIDDEN');
+  });
+  test('Cashier cannot update Admin tax configuration',async()=>{
+    const result=await request('/api/v1/tax-configuration',{token:cashierToken,method:'PUT',body:{registration_type:'NON_VAT',vat_rate_basis_points:0,pricing_mode:'INCLUSIVE',registered_name:'Test Clinic',tin:'TEST-TIN',registered_address:'Test',effective_from:new Date().toISOString().slice(0,10)}});
+    assert.equal(result.status,403);
+  });
+  test('stores the original inclusive VAT and statutory discount values on the invoice',async()=>{
+    try{
+      const changed=await request('/api/v1/tax-configuration',{token:adminToken,method:'PUT',body:{registration_type:'VAT_REGISTERED',vat_rate_basis_points:1200,pricing_mode:'INCLUSIVE',registered_name:'Test VAT Clinic',tin:'TEST-TIN',registered_address:'Local test database',effective_from:new Date().toISOString().slice(0,10)}});
+      assert.equal(changed.status,200);
+      const {productId}=await createProduct([{expires_on:'2099-01-01',quantity:2}],{price:112,tax_classification:'VATABLE',sc_discount_eligible:true,pwd_discount_eligible:true});
+      const sale=await request('/api/v1/sales',{method:'POST',headers:{'idempotency-key':`sc-${randomUUID()}`},body:{items:[{product_id:productId,quantity:1}],payments:[{method:'CASH',amount:80}],currency:'PHP',discount:{type:'SC',customer_name:'Test Senior',id_number:'TEST-ID-1'}}});
+      assert.equal(sale.status,200);saleIds.push(sale.body.id);
+      assert.equal(sale.body.subtotal,'100.00');assert.equal(sale.body.tax_total,'0.00');assert.equal(sale.body.discount_total,'20.00');assert.equal(sale.body.total,'80.00');
+      assert.equal(sale.body.invoice_number,sale.body.receipt_number);assert.equal(sale.body.tax_snapshot.vat_rate_basis_points,1200);assert.equal(sale.body.statutory_customer.id_number,'TEST-ID-1');
+    }finally{await request('/api/v1/tax-configuration',{token:adminToken,method:'PUT',body:{registration_type:'NON_VAT',vat_rate_basis_points:0,pricing_mode:'INCLUSIVE',registered_name:'Test Clinic',tin:'TEST-TIN',registered_address:'Local test database',effective_from:new Date().toISOString().slice(0,10)}});}
   });
 
   test('uses FEFO and excludes expired stock', async () => {
@@ -123,6 +141,23 @@ describe('isolated PostgreSQL sales and inventory transaction behavior', { skip:
     assert.deepEqual(allocations, [{ lot_id: lotIds[1], quantity: '3.000' }, { lot_id: lotIds[2], quantity: '1.000' }]);
     const stocks = (await pool.query('SELECT id,qty_on_hand FROM inventory_lot WHERE id=ANY($1::uuid[]) ORDER BY id', [lotIds])).rows;
     assert.equal(stocks.find(row => row.id === lotIds[0]).qty_on_hand, '4.000');
+  });
+  test('allows service sales without stock lots or inventory movements',async()=>{
+    const service=await createProduct([],{name:'Clinic service',item_type:'SERVICE'});
+    const result=await sell(service.productId,1,`service-${randomUUID()}`);
+    assert.equal(result.status,200);saleIds.push(result.body.id);
+    assert.equal((await pool.query('SELECT count(*)::int n FROM stock_movement WHERE product_id=$1',[service.productId])).rows[0].n,0);
+    assert.equal((await pool.query('SELECT count(*)::int n FROM sale_item_lot sil JOIN sale_item si ON si.id=sil.sale_item_id WHERE si.sale_id=$1',[result.body.id])).rows[0].n,0);
+  });
+
+  test('concurrent checkouts lock shared products in a stable order',async()=>{
+    const first=await createProduct([{expires_on:'2099-01-01',quantity:2}],{name:'First ordered product'});
+    const second=await createProduct([{expires_on:'2099-01-01',quantity:2}],{name:'Second ordered product'});
+    const checkout=(products,key)=>request('/api/v1/sales',{method:'POST',headers:{'idempotency-key':key},body:{items:products.map(product_id=>({product_id,quantity:1})),payments:[{method:'CASH',amount:20}],currency:'PHP'}});
+    const results=await Promise.all([checkout([first.productId,second.productId],`order-a-${randomUUID()}`),checkout([second.productId,first.productId],`order-b-${randomUUID()}`)]);
+    assert.deepEqual(results.map(result=>result.status),[200,200]);saleIds.push(...results.map(result=>result.body.id));
+    assert.deepEqual(results[0].body.items.map(item=>item.name),['First ordered product','Second ordered product']);
+    assert.deepEqual(results[1].body.items.map(item=>item.name),['Second ordered product','First ordered product']);
   });
 
   test('insufficient stock rolls back sale, payment, movements, and stock changes', async () => {

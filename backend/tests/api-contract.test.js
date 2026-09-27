@@ -12,6 +12,7 @@ test('invalid and client-declared failed payment payloads are rejected by strict
  assert.throws(()=>parseSaleInput({...valid,payments:[{method:'CASH',amount:12.5,status:'FAILED'}]}),{name:'ZodError'});
  assert.throws(()=>parseSaleInput({...valid,payments:[{method:'DECLINED',amount:12.5}]}),{name:'ZodError'});
  assert.throws(()=>parseSaleInput({...valid,payments:[{method:'CASH',amount:12.501}]}),{name:'ZodError'});
+ assert.throws(()=>parseSaleInput({...valid,discount:{type:'SC',percentage:100,customer_name:'Client',id_number:'X'}}),{name:'ZodError'});
 });
 test('mixed tender totals are checked in integer cents and mismatches fail',()=>{
  const sale=parseSaleInput({...valid,payments:[{method:'CASH',amount:5},{method:'CARD',amount:7.5}]});
@@ -36,9 +37,9 @@ test('report and movement endpoints are registered',()=>{
 test('product response limits lot details to Admin while preserving cashier totals and expiry warnings',()=>{
  assert.match(server,/const isAdmin=req\.user\.roles\.includes\('ADMIN'\);/);
  assert.match(server,/shapeProductRows\(rows,isAdmin\)/);
- const sample={id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',is_active:true,price:'12.50',currency:'PHP',qty_on_hand:'8',qty_sellable:'5',qty_expiring_soon:'2',lots:[{lot_id:'lot-secret',lot_code:'BATCH-SECRET',expires_on:'2026-10-01',qty_on_hand:'2',is_active:true,is_sellable:true}]};
+ const sample={id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',item_type:'PRODUCT',is_active:true,price:'12.50',currency:'PHP',qty_on_hand:'8',qty_sellable:'5',qty_expiring_soon:'2',lots:[{lot_id:'lot-secret',lot_code:'BATCH-SECRET',expires_on:'2026-10-01',qty_on_hand:'2',is_active:true,is_sellable:true}]};
  const [cashier]=shapeProductRows([sample],false);
- assert.deepEqual(cashier,{id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',price:'12.50',currency:'PHP',qty_sellable:'5',expiry_warning:true});
+ assert.deepEqual(cashier,{id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',item_type:'PRODUCT',price:'12.50',currency:'PHP',qty_sellable:'5',expiry_warning:true});
  for(const key of ['qty_on_hand','lots','is_active','qty_expiring_soon']) assert.equal(Object.hasOwn(cashier,key),false,`cashier must not receive ${key}`);
  const [admin]=shapeProductRows([sample],true);
  assert.equal(admin.lots[0].lot_id,'lot-secret');
@@ -50,4 +51,11 @@ test('cashier sales list is scoped in SQL while Admin may see all',()=>{
  const line=server.split(/\r?\n/).find(x=>x.startsWith("app.get('/api/v1/sales',"));
  assert.match(line,/\$1::boolean OR cashier_user_id=\$2/);
  assert.match(line,/req\.user\.roles\.includes\('ADMIN'\)/);
+});
+test('tax configuration mutation is Admin-only, product rules are backend validated, and sales have server quote pricing',()=>{
+ assert.match(server,/app\.put\('\/api\/v1\/tax-configuration', only\('ADMIN'\)/);
+ assert.match(server,/app\.post\('\/api\/v1\/sales\/quote', only\('ADMIN','CASHIER'\)/);
+ assert.match(server,/canonicalJson\(v\)/);
+ assert.match(server,/INVALID_PRICING_CONFIGURATION/);
+ assert.match(server,/statutory_discount_type/);
 });

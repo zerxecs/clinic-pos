@@ -2,13 +2,14 @@
 export function shapeProductRows(rows, isAdmin) {
   if (isAdmin) return rows;
 
-  return rows.map(({ id, sku, barcode, name, description, unit, price, currency, qty_sellable, qty_expiring_soon }) => ({
+  return rows.map(({ id, sku, barcode, name, description, unit, item_type, price, currency, qty_sellable, qty_expiring_soon }) => ({
     id,
     sku,
     barcode,
     name,
     description,
     unit,
+    item_type,
     price,
     currency,
     qty_sellable,
