@@ -21,10 +21,23 @@ test('mixed tender totals are checked in integer cents and mismatches fail',()=>
  assert.doesNotThrow(()=>assertPaymentTotal(sale.payments,12.5));
  assert.throws(()=>assertPaymentTotal(sale.payments,13),{code:'PAYMENT_TOTAL_MISMATCH',statusCode:400});
 });
+test('cash tender accepts exact and excess amounts, calculates integer-cent change, and rejects short or non-cash excess',()=>{
+ for(const [tender,change] of [[5,0n],[6,100n]])assert.equal(assertPaymentTotal([{method:'CASH',amount:tender}],5).changeCents,change);
+ for(const amount of [4.99,0])assert.throws(()=>assertPaymentTotal([{method:'CASH',amount}],5),{code:'PAYMENT_TOTAL_MISMATCH'});
+ assert.throws(()=>parseSaleInput({...valid,payments:[{method:'CASH',amount:-1}]}),{name:'ZodError'});
+ assert.throws(()=>assertPaymentTotal([{method:'CARD',amount:6}],5),{code:'PAYMENT_TOTAL_MISMATCH'});
+ assert.throws(()=>parseSaleInput({...valid,payments:[{method:'CASH',amount:6,change:1}]}),{name:'ZodError'});
+});
+test('cash tender/change persistence stays in checkout transaction and appears in reporting and sale response',()=>{
+ assert.match(server,/tendered_amount,change_amount/);
+ assert.match(server,/INSERT INTO payment\(sale_id,method,amount,currency,status,reference,recorded_by,tendered_amount,change_amount\)/);
+ assert.match(server,/return \{from,to,totals,by_day:byDay,transactions\}/);
+ assert.match(server,/p\.tendered_amount,p\.change_amount/);
+});
 test('sale input validation runs before transaction and payment totals before all writes',()=>{
  const validated=server.indexOf('const v=parseSaleInput(req.body);');
  const transaction=server.indexOf("return tx(async db=>{await db.query('SELECT pg_advisory_xact_lock",validated);
- const total=server.indexOf('assertPaymentTotal(v.payments,total);',transaction);
+ const total=server.indexOf('const paymentTotals=assertPaymentTotal(v.payments,priced.total);',transaction);
  const saleInsert=server.indexOf("INSERT INTO sale(receipt_number",transaction);
  const stockUpdate=server.indexOf('UPDATE inventory_lot SET qty_on_hand=qty_on_hand-$2',transaction);
  const paymentInsert=server.indexOf('INSERT INTO payment(sale_id',transaction);
