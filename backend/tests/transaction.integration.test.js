@@ -124,7 +124,20 @@ describe('isolated PostgreSQL sales and inventory transaction behavior', { skip:
       const sale=await request('/api/v1/sales',{method:'POST',headers:{'idempotency-key':`sc-${randomUUID()}`},body:{items:[{product_id:productId,quantity:1}],payments:[{method:'CASH',amount:80}],currency:'PHP',discount:{type:'SC',customer_name:'Test Senior',id_number:'TEST-ID-1'}}});
       assert.equal(sale.status,200);saleIds.push(sale.body.id);
       assert.equal(sale.body.subtotal,'100.00');assert.equal(sale.body.tax_total,'0.00');assert.equal(sale.body.discount_total,'20.00');assert.equal(sale.body.total,'80.00');
-      assert.equal(sale.body.invoice_number,sale.body.receipt_number);assert.equal(sale.body.tax_snapshot.vat_rate_basis_points,1200);assert.equal(sale.body.statutory_customer.id_number,'TEST-ID-1');
+      assert.equal(sale.body.invoice_number,sale.body.receipt_number);assert.equal(sale.body.tax_snapshot.vat_rate_basis_points,1200);assert.equal(Object.hasOwn(sale.body,'statutory_customer'),false);
+      const ordinary=await request(`/api/v1/sales/${sale.body.id}`);assert.equal(ordinary.status,200);assert.equal(JSON.stringify(ordinary.body).includes('TEST-ID-1'),false);
+      const invoice=await request(`/api/v1/sales/${sale.body.id}/invoice`);assert.equal(invoice.status,200);assert.equal(invoice.body.statutory_customer.id_number,'TEST-ID-1');
+      const beneficiaryRows=await pool.query('SELECT benefit_type,customer_name,id_number FROM sale_beneficiary WHERE sale_id=$1',[sale.body.id]);assert.deepEqual(beneficiaryRows.rows,[{benefit_type:'SC',customer_name:'Test Senior',id_number:'TEST-ID-1'}]);
+      await assert.rejects(pool.query('UPDATE sale SET total=total+1 WHERE id=$1',[sale.body.id]),error=>error.code==='23000');
+      await assert.rejects(pool.query('UPDATE sale_item SET line_total=line_total+1 WHERE sale_id=$1',[sale.body.id]),error=>error.code==='23000');
+      const integritySale=(await pool.query("INSERT INTO sale(receipt_number,status,cashier_user_id,subtotal,discount_total,tax_total,total,currency) VALUES($1,'PENDING',$2,0,0,0,0,'PHP') RETURNING id",[`IT-CONSTRAINT-${randomUUID()}`,adminId])).rows[0].id;
+      const template=(await pool.query('SELECT product_id,sku_snapshot,name_snapshot,quantity,unit_price,line_total FROM sale_item WHERE sale_id=$1 LIMIT 1',[sale.body.id])).rows[0];
+      try{
+        const values=[integritySale,template.product_id,template.sku_snapshot,template.name_snapshot,template.quantity,template.unit_price,template.line_total];
+        await pool.query('INSERT INTO sale_item(sale_id,line_no,product_id,sku_snapshot,name_snapshot,quantity,unit_price,line_total) VALUES($1,1,$2,$3,$4,$5,$6,$7)',values);
+        await assert.rejects(pool.query('INSERT INTO sale_item(sale_id,line_no,product_id,sku_snapshot,name_snapshot,quantity,unit_price,line_total) VALUES($1,1,$2,$3,$4,$5,$6,$7)',values),error=>error.code==='23505');
+        await assert.rejects(pool.query("INSERT INTO sale_item(sale_id,line_no,product_id,sku_snapshot,name_snapshot,quantity,unit_price,line_total,tax_classification) VALUES($1,2,$2,$3,$4,$5,$6,$7,'INVALID')",values),error=>error.code==='23514');
+      }finally{await pool.query('DELETE FROM sale_item WHERE sale_id=$1',[integritySale]);await pool.query('DELETE FROM sale WHERE id=$1',[integritySale]);}
     }finally{await request('/api/v1/tax-configuration',{token:adminToken,method:'PUT',body:{registration_type:'NON_VAT',vat_rate_basis_points:0,pricing_mode:'INCLUSIVE',registered_name:'Test Clinic',tin:'TEST-TIN',registered_address:'Local test database',effective_from:new Date().toISOString().slice(0,10)}});}
   });
 

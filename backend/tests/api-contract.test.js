@@ -7,6 +7,8 @@ import { parseSaleInput, assertPaymentTotal } from '../src/sales-input.js';
 import { shapeProductRows } from '../src/product-response.js';
 const serverPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../src/server.js');
 const server=await readFile(serverPath,'utf8');
+const migration=await readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../migrations/003_sale_integrity_privacy.sql'),'utf8');
+const invoiceMigration=await readFile(path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../migrations/004_invoice_authorization_fields.sql'),'utf8');
 const valid={items:[{product_id:'00000000-0000-4000-8000-000000000001',quantity:1}],payments:[{method:'CASH',amount:12.5}],currency:'PHP'};
 test('invalid and client-declared failed payment payloads are rejected by strict validation',()=>{
  assert.throws(()=>parseSaleInput({...valid,payments:[{method:'CASH',amount:12.5,status:'FAILED'}]}),{name:'ZodError'});
@@ -58,4 +60,29 @@ test('tax configuration mutation is Admin-only, product rules are backend valida
  assert.match(server,/canonicalJson\(v\)/);
  assert.match(server,/INVALID_PRICING_CONFIGURATION/);
  assert.match(server,/statutory_discount_type/);
+});
+
+test('tax migration backfills deterministic historical line numbers and constrains values',()=>{
+ assert.match(migration,/row_number\(\) OVER \(PARTITION BY sale_id ORDER BY id\)/);
+ assert.match(migration,/UNIQUE \(sale_id, line_no\)/);
+ assert.match(migration,/tax_classification IN \('UNCLASSIFIED','VATABLE','VAT_EXEMPT','ZERO_RATED','NON_VAT'\)/);
+ assert.match(migration,/Existing empty tax snapshots remain explicitly unknown/);
+ assert.match(migration,/status IN \('PENDING','COMPLETED','VOIDED'\)/);
+ assert.match(migration,/BEFORE INSERT OR UPDATE OR DELETE ON sale_item/);
+});
+
+test('beneficiary identity is absent from normal sale responses and invoice reads are separate and audited',()=>{
+ assert.match(server,/statutory_customer:s\.statutory_discount_type\?\{type:s\.statutory_discount_type\}:null/);
+ assert.match(server,/app\.get\('\/api\/v1\/sales\/:id\/invoice', only\('ADMIN','CASHIER'\)/);
+ assert.match(server,/SALE_INVOICE_BENEFICIARY_VIEWED/);
+ assert.match(server,/INSERT INTO sale_beneficiary\(sale_id,benefit_type,customer_name,id_number\)/);
+ const saleList=server.split(/\r?\n/).find(x=>x.startsWith("app.get('/api/v1/sales',"));
+ assert.doesNotMatch(saleList,/statutory|beneficiar/i);
+});
+
+test('invoice authorization fields are configurable and never seeded with fake seller values',()=>{
+ for(const field of ['permit_to_use_number','permit_to_use_date','authority_to_print_number','authority_to_print_date','approved_serial_numbers']) assert.match(invoiceMigration,new RegExp(`ADD COLUMN ${field}`));
+ assert.match(server,/permit_to_use_number:z\.string\(\)\.trim\(\)\.max\(100\)/);
+ assert.match(server,/approved_serial_numbers:z\.string\(\)\.trim\(\)\.max\(500\)/);
+ assert.doesNotMatch(invoiceMigration,/INSERT INTO|UPDATE tax_configuration/);
 });
