@@ -967,3 +967,240 @@ button:disabled {
   color: #a96837;
   font-weight: 700
 }
+
+/* Statistical report layout */
+.section-title {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 22px 0 12px
+}
+.section-title h2 {
+  font-size: 16px;
+  margin: 0 0 4px
+}
+.section-title p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px
+}
+.report-section {
+  margin-bottom: 22px
+}
+.report-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit,minmax(190px,1fr));
+  gap: 12px
+}
+.report-kpi {
+  min-width: 0;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px
+}
+.report-kpi strong {
+  font-size: 20px;
+  line-height: 1.2;
+  overflow-wrap: anywhere
+}
+.report-layout {
+  display: grid;
+  grid-template-columns: minmax(0,1.65fr) minmax(280px,.8fr);
+  gap: 16px
+}
+.report-spacer {
+  margin-top: 15px
+}
+.report-filters {
+  margin-bottom: 18px
+}
+.report-inventory-stats {
+  grid-template-columns: repeat(auto-fit,minmax(150px,1fr));
+  margin-bottom: 0
+}
+.chart-bars {
+  height: 220px;
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  overflow-x: auto;
+  padding: 16px 6px 0;
+  border-bottom: 1px solid var(--line)
+}
+.chart-bar-item {
+  flex: 1;
+  min-width: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px
+}
+.chart-bar-value {
+  font-size: 9px;
+  color: var(--muted);
+  white-space: nowrap
+}
+.chart-bar {
+  width: min(26px,70%);
+  min-height: 4px;
+  background: linear-gradient(180deg,#69a78a,#17795f);
+  border-radius: 5px 5px 0 0
+}
+.chart-bar-label {
+  font-size: 9px;
+  color: var(--muted);
+  white-space: nowrap
+}
+.audit-stats {
+  display: grid;
+  grid-template-columns: repeat(3,minmax(0,1fr));
+  gap: 8px
+}
+.audit-stats div {
+  padding: 10px 8px;
+  background: #f6f9f7;
+  border-radius: 9px;
+  min-width: 0
+}
+.audit-stats strong {
+  display: block;
+  font-size: 19px
+}
+.audit-stats span {
+  font-size: 10px;
+  color: var(--muted)
+}
+.audit-action-list {
+  display: grid;
+  gap: 12px
+}
+.audit-action>strong {
+  font-size: 10px;
+  overflow-wrap: anywhere
+}
+.audit-action>span {
+  float: right;
+  font-size: 10px;
+  color: var(--muted)
+}
+.audit-log {
+  margin-top: 22px
+}
+.audit-log .data-table td:last-child {
+  white-space: normal;
+  min-width: 180px;
+  max-width: 420px;
+  overflow-wrap: anywhere
+}
+@media(max-width:1000px) {
+  .report-layout {
+    grid-template-columns: minmax(0,1fr)
+  }
+
+}
+@media(max-width:760px) {
+  .section-title {
+    align-items: flex-start;
+    flex-direction: column
+  }
+  .report-kpis {
+    grid-template-columns: repeat(2,minmax(0,1fr))
+  }
+  .report-filters .search-row {
+    flex-wrap: wrap
+  }
+  .report-filters .field {
+    flex: 1;
+    min-width: 125px
+  }
+  .chart-bars {
+    height: 190px
+  }
+  .audit-log .table-wrap {
+    max-width: calc(100vw - 48px)
+  }
+
+}
+@media(max-width:420px) {
+  .report-kpis {
+    grid-template-columns: 1fr
+  }
+  .audit-stats {
+    grid-template-columns: 1fr 1fr
+  }
+  .audit-stats div:last-child {
+    grid-column: 1/-1
+  }
+
+}
+
+/* Shared interaction and compact screen refinements */
+:where(button,a,input,select,textarea,[tabindex]):focus-visible {
+  outline: 3px solid #4a9274;
+  outline-offset: 2px
+}
+
+.btn {
+  min-height: 38px
+}
+.btn.small {
+  min-height: 30px
+}
+.panel-head {
+  min-width: 0
+}
+.page-heading {
+  margin-bottom: 20px
+}
+.field input,.field select,.field textarea,.search-input {
+  min-height: 42px
+}
+
+@media(max-width:1000px) {
+  .app-shell {
+    grid-template-columns: 190px minmax(0,1fr)
+  }
+  .content {
+    padding: 24px
+  }
+
+}
+
+@media(max-width:760px) {
+  .sidebar {
+    overflow-y: auto
+  }
+  .nav-btn {
+    min-height: 44px
+  }
+  .content {
+    padding: 18px 14px
+  }
+  .panel-head {
+    align-items: flex-start;
+    flex-wrap: wrap
+  }
+  .search-row {
+    min-width: 0
+  }
+  .cart-list {
+    max-height: 280px
+  }
+
+}
+
+@media(prefers-reduced-motion:reduce) {
+  *,*::before,*::after {
+    scroll-behavior: auto!important;
+    animation-duration: .01ms!important;
+    animation-iteration-count: 1!important;
+    transition-duration: .01ms!important
+  }
+
+}
