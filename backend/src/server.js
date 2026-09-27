@@ -12,134 +12,1157 @@ import { z } from 'zod';
 import { validateAccessTokenSecret } from './security-config.js';
 
 const { Pool } = pg;
-if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
+
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL is required');
+}
+
 const accessTokenSecret = validateAccessTokenSecret(process.env.ACCESS_TOKEN_SECRET);
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10, ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,
+  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+});
 const key = new TextEncoder().encode(accessTokenSecret);
 const app = Fastify({ logger: true, genReqId: () => randomUUID() });
 const id = z.string().uuid();
-const fail = (status, code, message) => { const e = new Error(message); e.statusCode = status; e.code = code; throw e; };
-app.setErrorHandler((err, req, reply) => { req.log.error(err); const bad=err.name==='ZodError'; reply.code(bad?400:(err.statusCode||500)).send({ code: bad?'INVALID_INPUT':(err.code||'INTERNAL_ERROR'), message: bad?'Request validation failed':(err.statusCode?err.message:'Request failed'), request_id:req.id }); });
-app.addHook('onRequest', async (req, reply) => { reply.header('x-request-id', req.id); });
+
+function fail(status, code, message) {
+  const error = new Error(message);
+  error.statusCode = status;
+  error.code = code;
+  throw error;
+}
+
+app.setErrorHandler((error, req, reply) => {
+  req.log.error(error);
+  const isValidationError = error.name === 'ZodError';
+  const statusCode = isValidationError ? 400 : error.statusCode || 500;
+  const code = isValidationError ? 'INVALID_INPUT' : error.code || 'INTERNAL_ERROR';
+  let message = 'Request failed';
+  if (isValidationError) {
+    message = 'Request validation failed';
+  } else if (error.statusCode) {
+    message = error.message;
+  }
+
+  reply.code(statusCode).send({ code, message, request_id: req.id });
+});
+
+app.addHook('onRequest', async (req, reply) => {
+  reply.header('x-request-id', req.id);
+});
+
 async function access(req) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (!token) fail(401, 'UNAUTHENTICATED', 'Login required');
+  if (!token) {
+    fail(401, 'UNAUTHENTICATED', 'Login required');
+  }
+
   let claims;
-  try { ({ payload: claims } = await jwtVerify(token, key)); } catch { fail(401, 'INVALID_TOKEN', 'Login required'); }
-  const { rows } = await pool.query('SELECT u.id,u.username,u.display_name,array_agg(r.code) AS roles FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id WHERE u.id=$1 AND u.is_active GROUP BY u.id', [claims.sub]);
-  if (!rows[0]) fail(401, 'INVALID_USER', 'Login required');
+  try {
+    ({ payload: claims } = await jwtVerify(token, key));
+  } catch {
+    fail(401, 'INVALID_TOKEN', 'Login required');
+  }
+
+  // Load active roles from the database so authorization uses current assignments.
+  const { rows } = await pool.query(
+    'SELECT u.id, u.username, u.display_name, array_agg(r.code) AS roles ' +
+      'FROM app_user u ' +
+      'JOIN user_role ur ON ur.user_id = u.id ' +
+      'JOIN role r ON r.id = ur.role_id ' +
+      'WHERE u.id = $1 AND u.is_active ' +
+      'GROUP BY u.id',
+    [claims.sub]
+  );
+
+  if (!rows[0]) {
+    fail(401, 'INVALID_USER', 'Login required');
+  }
   req.user = rows[0];
 }
+
 const auth = { preHandler: access };
-const only = (...roles) => ({ preHandler: async (req, reply) => { await access(req); if (!roles.some(r => req.user.roles.includes(r))) fail(403, 'FORBIDDEN', 'Insufficient role'); } });
-const issueAccess = user => new SignJWT({ username: user.username }).setProtectedHeader({ alg: 'HS256' }).setSubject(user.id).setIssuedAt().setExpirationTime('15m').sign(key);
-const tokenHash = value => createHash('sha256').update(value).digest('hex');
-const audit = (db, actor, action, entity, entityId, details = {}) => db.query('INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details) VALUES($1,$2,$3,$4,$5)', [actor || null, action, entity, entityId || null, JSON.stringify(details)]);
-const tx = async fn => { const db = await pool.connect(); try { await db.query('BEGIN'); const result = await fn(db); await db.query('COMMIT'); return result; } catch (e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); } };
+const only = (...roles) => ({
+  preHandler: async (req) => {
+    await access(req);
+    if (!roles.some((role) => req.user.roles.includes(role))) {
+      fail(403, 'FORBIDDEN', 'Insufficient role');
+    }
+  },
+});
+
+const issueAccess = (user) =>
+  new SignJWT({ username: user.username })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setSubject(user.id)
+    .setIssuedAt()
+    .setExpirationTime('15m')
+    .sign(key);
+const tokenHash = (value) => createHash('sha256').update(value).digest('hex');
+const audit = (db, actor, action, entity, entityId, details = {}) =>
+  db.query(
+    'INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details) VALUES($1,$2,$3,$4,$5)',
+    [actor || null, action, entity, entityId || null, JSON.stringify(details)]
+  );
+
+async function tx(fn) {
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const result = await fn(db);
+    await db.query('COMMIT');
+    return result;
+  } catch (error) {
+    await db.query('ROLLBACK');
+    throw error;
+  } finally {
+    db.release();
+  }
+}
+
 const text = z.string().trim().min(1).max(200);
 
 app.get('/api/v1/tax-configuration', auth, async () => {
-  const { rows } = await pool.query('SELECT registration_type,vat_rate_basis_points,pricing_mode,registered_name,trade_name,tin,branch_code,registered_address,effective_from,permit_to_use_number,permit_to_use_date,authority_to_print_number,authority_to_print_date,approved_serial_numbers,updated_at FROM tax_configuration WHERE id=1');
+  const { rows } = await pool.query(
+    `SELECT
+      registration_type,
+      vat_rate_basis_points,
+      pricing_mode,
+      registered_name,
+      trade_name,
+      tin,
+      branch_code,
+      registered_address,
+      effective_from,
+      permit_to_use_number,
+      permit_to_use_date,
+      authority_to_print_number,
+      authority_to_print_date,
+      approved_serial_numbers,
+      updated_at
+    FROM tax_configuration
+    WHERE id = 1`
+  );
   return rows[0];
 });
-app.put('/api/v1/tax-configuration', only('ADMIN'), async req => {
-  const v=z.object({registration_type:z.enum(['VAT_REGISTERED','NON_VAT','VAT_EXEMPT']),vat_rate_basis_points:z.number().int().min(0).max(10000),pricing_mode:z.enum(['INCLUSIVE','EXCLUSIVE']),registered_name:z.string().trim().min(1).max(200),trade_name:z.string().trim().max(200).nullable().optional(),tin:z.string().trim().min(1).max(32),branch_code:z.string().trim().max(32).nullable().optional(),registered_address:z.string().trim().min(1).max(500),effective_from:z.string().date(),permit_to_use_number:z.string().trim().max(100).nullable().optional(),permit_to_use_date:z.string().date().nullable().optional(),authority_to_print_number:z.string().trim().max(100).nullable().optional(),authority_to_print_date:z.string().date().nullable().optional(),approved_serial_numbers:z.string().trim().max(500).nullable().optional()}).strict().refine(v=>v.registration_type==='VAT_REGISTERED'||v.vat_rate_basis_points===0,{message:'A VAT rate applies only to VAT-registered configuration.'}).parse(req.body);
-  const today=(await pool.query('SELECT current_date::text AS today')).rows[0].today;if(v.effective_from>today)fail(400,'FUTURE_TAX_CONFIGURATION','Tax configuration cannot take effect in the future.');
-  return tx(async db=>{const previous=(await db.query('SELECT * FROM tax_configuration WHERE id=1 FOR UPDATE')).rows[0];const saved=(await db.query('UPDATE tax_configuration SET registration_type=$1,vat_rate_basis_points=$2,pricing_mode=$3,registered_name=$4,trade_name=$5,tin=$6,branch_code=$7,registered_address=$8,effective_from=$9,permit_to_use_number=$10,permit_to_use_date=$11,authority_to_print_number=$12,authority_to_print_date=$13,approved_serial_numbers=$14,updated_by=$15,updated_at=now() WHERE id=1 RETURNING registration_type,vat_rate_basis_points,pricing_mode,registered_name,trade_name,tin,branch_code,registered_address,effective_from,permit_to_use_number,permit_to_use_date,authority_to_print_number,authority_to_print_date,approved_serial_numbers,updated_at',[v.registration_type,v.vat_rate_basis_points,v.pricing_mode,v.registered_name,v.trade_name||null,v.tin||null,v.branch_code||null,v.registered_address,v.effective_from,v.permit_to_use_number||null,v.permit_to_use_date||null,v.authority_to_print_number||null,v.authority_to_print_date||null,v.approved_serial_numbers||null,req.user.id])).rows[0];await audit(db,req.user.id,'TAX_CONFIGURATION_UPDATED','tax_configuration',null,{previous:{registration_type:previous.registration_type,vat_rate_basis_points:previous.vat_rate_basis_points,pricing_mode:previous.pricing_mode},next:{registration_type:v.registration_type,vat_rate_basis_points:v.vat_rate_basis_points,pricing_mode:v.pricing_mode}});return saved;});
+
+app.put('/api/v1/tax-configuration', only('ADMIN'), async (req) => {
+  const taxConfig = z
+    .object({
+      registration_type: z.enum(['VAT_REGISTERED', 'NON_VAT', 'VAT_EXEMPT']),
+      vat_rate_basis_points: z.number().int().min(0).max(10000),
+      pricing_mode: z.enum(['INCLUSIVE', 'EXCLUSIVE']),
+      registered_name: z.string().trim().min(1).max(200),
+      trade_name: z.string().trim().max(200).nullable().optional(),
+      tin: z.string().trim().min(1).max(32),
+      branch_code: z.string().trim().max(32).nullable().optional(),
+      registered_address: z.string().trim().min(1).max(500),
+      effective_from: z.string().date(),
+      permit_to_use_number: z.string().trim().max(100).nullable().optional(),
+      permit_to_use_date: z.string().date().nullable().optional(),
+      authority_to_print_number: z.string().trim().max(100).nullable().optional(),
+      authority_to_print_date: z.string().date().nullable().optional(),
+      approved_serial_numbers: z.string().trim().max(500).nullable().optional(),
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.registration_type === 'VAT_REGISTERED' ||
+        value.vat_rate_basis_points === 0,
+      { message: 'A VAT rate applies only to VAT-registered configuration.' }
+    )
+    .parse(req.body);
+  const today = (
+    await pool.query('SELECT current_date::text AS today')
+  ).rows[0].today;
+
+  if (taxConfig.effective_from > today) {
+    fail(
+      400,
+      'FUTURE_TAX_CONFIGURATION',
+      'Tax configuration cannot take effect in the future.'
+    );
+  }
+
+  return tx(async (db) => {
+    // Keep the previous settings and their audit entry consistent under concurrent updates.
+    const previous = (
+      await db.query('SELECT * FROM tax_configuration WHERE id = 1 FOR UPDATE')
+    ).rows[0];
+    const saved = (
+      await db.query(
+        `UPDATE tax_configuration
+        SET registration_type = $1,
+            vat_rate_basis_points = $2,
+            pricing_mode = $3,
+            registered_name = $4,
+            trade_name = $5,
+            tin = $6,
+            branch_code = $7,
+            registered_address = $8,
+            effective_from = $9,
+            permit_to_use_number = $10,
+            permit_to_use_date = $11,
+            authority_to_print_number = $12,
+            authority_to_print_date = $13,
+            approved_serial_numbers = $14,
+            updated_by = $15,
+            updated_at = now()
+        WHERE id = 1
+        RETURNING
+          registration_type,
+          vat_rate_basis_points,
+          pricing_mode,
+          registered_name,
+          trade_name,
+          tin,
+          branch_code,
+          registered_address,
+          effective_from,
+          permit_to_use_number,
+          permit_to_use_date,
+          authority_to_print_number,
+          authority_to_print_date,
+          approved_serial_numbers,
+          updated_at`,
+        [
+          taxConfig.registration_type,
+          taxConfig.vat_rate_basis_points,
+          taxConfig.pricing_mode,
+          taxConfig.registered_name,
+          taxConfig.trade_name || null,
+          taxConfig.tin || null,
+          taxConfig.branch_code || null,
+          taxConfig.registered_address,
+          taxConfig.effective_from,
+          taxConfig.permit_to_use_number || null,
+          taxConfig.permit_to_use_date || null,
+          taxConfig.authority_to_print_number || null,
+          taxConfig.authority_to_print_date || null,
+          taxConfig.approved_serial_numbers || null,
+          req.user.id,
+        ]
+      )
+    ).rows[0];
+
+    await audit(db, req.user.id, 'TAX_CONFIGURATION_UPDATED', 'tax_configuration', null, {
+      previous: {
+        registration_type: previous.registration_type,
+        vat_rate_basis_points: previous.vat_rate_basis_points,
+        pricing_mode: previous.pricing_mode,
+      },
+      next: {
+        registration_type: taxConfig.registration_type,
+        vat_rate_basis_points: taxConfig.vat_rate_basis_points,
+        pricing_mode: taxConfig.pricing_mode,
+      },
+    });
+    return saved;
+  });
 });
 
 app.get('/health', async () => ({ status: 'ok' }));
 app.post('/api/v1/auth/login', async (req, reply) => {
-  const input = z.object({ username: text.max(80), password: z.string().min(1).max(200) }).parse(req.body);
-  const { rows } = await pool.query('SELECT id,username,password_hash,display_name FROM app_user WHERE username=lower($1) AND is_active', [input.username]);
-  if (!rows[0] || !(await argon2.verify(rows[0].password_hash, input.password).catch(() => false))) { await audit(pool, null, 'AUTH_LOGIN_FAILED', 'app_user', null, { username: input.username }); fail(401, 'INVALID_CREDENTIALS', 'Invalid username or password'); }
-  const user = rows[0]; const refresh = randomBytes(48).toString('base64url');
-  await pool.query("INSERT INTO refresh_session(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '30 days')", [user.id, tokenHash(refresh)]);
+  const input = z
+    .object({ username: text.max(80), password: z.string().min(1).max(200) })
+    .parse(req.body);
+  const { rows } = await pool.query(
+    'SELECT id, username, password_hash, display_name FROM app_user WHERE username = lower($1) AND is_active',
+    [input.username]
+  );
+  const user = rows[0];
+  const passwordIsValid = user
+    ? await argon2.verify(user.password_hash, input.password).catch(() => false)
+    : false;
+
+  if (!user || !passwordIsValid) {
+    await audit(pool, null, 'AUTH_LOGIN_FAILED', 'app_user', null, {
+      username: input.username,
+    });
+    fail(401, 'INVALID_CREDENTIALS', 'Invalid username or password');
+  }
+
+  const refreshToken = randomBytes(48).toString('base64url');
+  await pool.query(
+    "INSERT INTO refresh_session(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '30 days')",
+    [user.id, tokenHash(refreshToken)]
+  );
   await audit(pool, user.id, 'AUTH_LOGIN', 'app_user', user.id);
-  return reply.send({ access_token: await issueAccess(user), refresh_token: refresh, token_type: 'Bearer', expires_in: 900 });
-});
-app.post('/api/v1/auth/refresh', async (req, reply) => {
-  const { refresh_token } = z.object({ refresh_token: z.string().min(32).max(200) }).parse(req.body);
-  const newToken = randomBytes(48).toString('base64url');
-  const result = await tx(async db => {
-    const s = await db.query('SELECT s.id,s.user_id,u.username FROM refresh_session s JOIN app_user u ON u.id=s.user_id WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at>now() AND u.is_active FOR UPDATE', [tokenHash(refresh_token)]);
-    if (!s.rows[0]) fail(401, 'INVALID_REFRESH_TOKEN', 'Login required');
-    await db.query('UPDATE refresh_session SET revoked_at=now() WHERE id=$1', [s.rows[0].id]);
-    await db.query("INSERT INTO refresh_session(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '30 days')", [s.rows[0].user_id, tokenHash(newToken)]);
-    return { id: s.rows[0].user_id, username: s.rows[0].username };
+
+  return reply.send({
+    access_token: await issueAccess(user),
+    refresh_token: refreshToken,
+    token_type: 'Bearer',
+    expires_in: 900,
   });
-  return reply.send({ access_token: await issueAccess(result), refresh_token: newToken, token_type: 'Bearer', expires_in: 900 });
 });
-app.post('/api/v1/auth/logout', auth, async req => { const input = z.object({ refresh_token: z.string().min(32).max(200) }).parse(req.body); await pool.query('UPDATE refresh_session SET revoked_at=now() WHERE user_id=$1 AND token_hash=$2 AND revoked_at IS NULL', [req.user.id, tokenHash(input.refresh_token)]); await audit(pool, req.user.id, 'AUTH_LOGOUT', 'app_user', req.user.id); return { ok: true }; });
-app.get('/api/v1/auth/me', auth, async req => ({ id: req.user.id, username: req.user.username, display_name: req.user.display_name, roles: req.user.roles }));
 
-app.get('/api/v1/users', only('ADMIN'), async req => { const { rows } = await pool.query('SELECT u.id,u.username,u.display_name,u.is_active,u.created_at,array_agg(r.code) roles FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id GROUP BY u.id ORDER BY u.username LIMIT 200'); return { items: rows }; });
-app.post('/api/v1/users', only('ADMIN'), async req => {
-  const v = z.object({ username: z.string().trim().min(3).max(80).regex(/^[a-zA-Z0-9._-]+$/), display_name: text, password: z.string().min(12).max(200), roles: z.array(z.enum(['ADMIN','CASHIER'])).min(1).max(2) }).parse(req.body);
-  return tx(async db => { const u = (await db.query('INSERT INTO app_user(username,password_hash,display_name) VALUES(lower($1),$2,$3) RETURNING id,username,display_name,is_active,created_at', [v.username, await argon2.hash(v.password), v.display_name])).rows[0]; for (const r of new Set(v.roles)) await db.query('INSERT INTO user_role(user_id,role_id) SELECT $1,id FROM role WHERE code=$2', [u.id,r]); await audit(db,req.user.id,'USER_CREATED','app_user',u.id,{roles:v.roles}); return { ...u, roles: [...new Set(v.roles)] }; });
+app.post('/api/v1/auth/refresh', async (req, reply) => {
+  const { refresh_token: refreshToken } = z
+    .object({ refresh_token: z.string().min(32).max(200) })
+    .parse(req.body);
+  const newToken = randomBytes(48).toString('base64url');
+  const user = await tx(async (db) => {
+    const session = await db.query(
+      'SELECT s.id, s.user_id, u.username ' +
+        'FROM refresh_session s ' +
+        'JOIN app_user u ON u.id = s.user_id ' +
+        'WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now() ' +
+        'AND u.is_active FOR UPDATE',
+      [tokenHash(refreshToken)]
+    );
+    const currentSession = session.rows[0];
+
+    if (!currentSession) {
+      fail(401, 'INVALID_REFRESH_TOKEN', 'Login required');
+    }
+
+    await db.query('UPDATE refresh_session SET revoked_at = now() WHERE id = $1', [
+      currentSession.id,
+    ]);
+    await db.query(
+      "INSERT INTO refresh_session(user_id,token_hash,expires_at) VALUES($1,$2,now()+interval '30 days')",
+      [currentSession.user_id, tokenHash(newToken)]
+    );
+    return { id: currentSession.user_id, username: currentSession.username };
+  });
+
+  return reply.send({
+    access_token: await issueAccess(user),
+    refresh_token: newToken,
+    token_type: 'Bearer',
+    expires_in: 900,
+  });
 });
-app.put('/api/v1/users/:id/roles', only('ADMIN'), async req => { const userId=id.parse(req.params.id); const {roles}=z.object({roles:z.array(z.enum(['ADMIN','CASHIER'])).min(1).max(2)}).parse(req.body); return tx(async db=>{ const u=(await db.query('SELECT id FROM app_user WHERE id=$1 AND is_active FOR UPDATE',[userId])).rows[0]; if(!u)fail(404,'NOT_FOUND','Active user not found'); await db.query('DELETE FROM user_role WHERE user_id=$1',[userId]); for(const role of new Set(roles)) await db.query('INSERT INTO user_role(user_id,role_id) SELECT $1,id FROM role WHERE code=$2',[userId,role]); const admins=await db.query("SELECT count(*)::int n FROM app_user u JOIN user_role ur ON ur.user_id=u.id JOIN role r ON r.id=ur.role_id WHERE u.is_active AND r.code='ADMIN'"); if(admins.rows[0].n<1)fail(409,'LAST_ADMIN','At least one active Admin is required'); await audit(db,req.user.id,'USER_ROLES_UPDATED','app_user',userId,{roles:[...new Set(roles)]}); return {user_id:userId,roles:[...new Set(roles)]}; }); });
-app.patch('/api/v1/users/:id', only('ADMIN'), async req => { const userId=id.parse(req.params.id); const v=z.object({display_name:text.optional(),is_active:z.boolean().optional(),password:z.string().min(12).max(200).optional()}).refine(x=>Object.keys(x).length>0).parse(req.body); const sets=[]; const vals=[userId]; for(const [k,col] of [['display_name','display_name'],['is_active','is_active']]) if(v[k]!==undefined){vals.push(v[k]);sets.push(`${col}=$${vals.length}`)} if(v.password){vals.push(await argon2.hash(v.password));sets.push(`password_hash=$${vals.length}`)} sets.push('updated_at=now()'); const {rows}=await pool.query(`UPDATE app_user SET ${sets.join(',')} WHERE id=$1 RETURNING id,username,display_name,is_active`,vals); if(!rows[0])fail(404,'NOT_FOUND','User not found'); await audit(pool,req.user.id,'USER_UPDATED','app_user',userId); return rows[0]; });
 
-app.get('/api/v1/products', auth, async req => {
- const q=String(req.query?.q||'').slice(0,100);
- const isAdmin=req.user.roles.includes('ADMIN');
- const {rows}=await pool.query("SELECT p.id,p.sku,p.barcode,p.name,p.description,p.unit,p.is_active,p.item_type,p.tax_classification,p.sc_discount_eligible,p.pwd_discount_eligible,p.promotion_basis_points,pp.amount price,pp.currency,COALESCE(sum(l.qty_on_hand),0) qty_on_hand,CASE WHEN p.item_type='SERVICE' THEN 100000 ELSE COALESCE(sum(l.qty_on_hand) FILTER(WHERE l.is_active AND (l.expires_on IS NULL OR l.expires_on>=current_date)),0) END qty_sellable,COALESCE(sum(l.qty_on_hand) FILTER(WHERE l.is_active AND l.qty_on_hand>0 AND l.expires_on BETWEEN current_date AND current_date+30),0) qty_expiring_soon,COALESCE(jsonb_agg(jsonb_build_object('lot_id',l.id,'lot_code',l.lot_code,'expires_on',l.expires_on,'qty_on_hand',l.qty_on_hand,'is_active',l.is_active,'is_sellable',(l.is_active AND (l.expires_on IS NULL OR l.expires_on>=current_date))) ORDER BY l.expires_on NULLS LAST,l.received_at,l.id) FILTER(WHERE l.id IS NOT NULL AND l.qty_on_hand>0),'[]'::jsonb) lots FROM product p LEFT JOIN LATERAL(SELECT amount,currency FROM product_price WHERE product_id=p.id AND effective_from<=now() AND (effective_to IS NULL OR effective_to>now()) ORDER BY effective_from DESC LIMIT 1) pp ON true LEFT JOIN inventory_lot l ON l.product_id=p.id WHERE p.is_active AND ($1='' OR p.name ILIKE '%'||$1||'%' OR p.sku ILIKE '%'||$1||'%' OR p.barcode=$1) GROUP BY p.id,pp.amount,pp.currency ORDER BY p.name LIMIT 100",[q]);
- return {items:shapeProductRows(rows,isAdmin)};
+app.post('/api/v1/auth/logout', auth, async (req) => {
+  const input = z
+    .object({ refresh_token: z.string().min(32).max(200) })
+    .parse(req.body);
+  await pool.query(
+    'UPDATE refresh_session SET revoked_at = now() ' +
+      'WHERE user_id = $1 AND token_hash = $2 AND revoked_at IS NULL',
+    [req.user.id, tokenHash(input.refresh_token)]
+  );
+  await audit(pool, req.user.id, 'AUTH_LOGOUT', 'app_user', req.user.id);
+  return { ok: true };
+});
+
+app.get('/api/v1/auth/me', auth, async (req) => ({
+  id: req.user.id,
+  username: req.user.username,
+  display_name: req.user.display_name,
+  roles: req.user.roles,
+}));
+
+app.get('/api/v1/users', only('ADMIN'), async () => {
+  const { rows } = await pool.query(
+    `SELECT
+      u.id,
+      u.username,
+      u.display_name,
+      u.is_active,
+      u.created_at,
+      array_agg(r.code) AS roles
+    FROM app_user u
+    JOIN user_role ur ON ur.user_id = u.id
+    JOIN role r ON r.id = ur.role_id
+    GROUP BY u.id
+    ORDER BY u.username
+    LIMIT 200`
+  );
+  return { items: rows };
+});
+
+app.post('/api/v1/users', only('ADMIN'), async (req) => {
+  const input = z
+    .object({
+      username: z.string().trim().min(3).max(80).regex(/^[a-zA-Z0-9._-]+$/),
+      display_name: text,
+      password: z.string().min(12).max(200),
+      roles: z.array(z.enum(['ADMIN', 'CASHIER'])).min(1).max(2),
+    })
+    .parse(req.body);
+  const uniqueRoles = [...new Set(input.roles)];
+
+  return tx(async (db) => {
+    const user = (
+      await db.query(
+        'INSERT INTO app_user(username,password_hash,display_name) ' +
+          'VALUES(lower($1),$2,$3) ' +
+          'RETURNING id,username,display_name,is_active,created_at',
+        [input.username, await argon2.hash(input.password), input.display_name]
+      )
+    ).rows[0];
+
+    for (const role of uniqueRoles) {
+      await db.query(
+        'INSERT INTO user_role(user_id,role_id) SELECT $1,id FROM role WHERE code=$2',
+        [user.id, role]
+      );
+    }
+    await audit(db, req.user.id, 'USER_CREATED', 'app_user', user.id, {
+      roles: input.roles,
+    });
+
+    return { ...user, roles: uniqueRoles };
+  });
+});
+
+app.put('/api/v1/users/:id/roles', only('ADMIN'), async (req) => {
+  const userId = id.parse(req.params.id);
+  const { roles } = z
+    .object({ roles: z.array(z.enum(['ADMIN', 'CASHIER'])).min(1).max(2) })
+    .parse(req.body);
+  const uniqueRoles = [...new Set(roles)];
+
+  return tx(async (db) => {
+    const user = (
+      await db.query('SELECT id FROM app_user WHERE id = $1 AND is_active FOR UPDATE', [
+        userId,
+      ])
+    ).rows[0];
+
+    if (!user) {
+      fail(404, 'NOT_FOUND', 'Active user not found');
+    }
+
+    await db.query('DELETE FROM user_role WHERE user_id = $1', [userId]);
+    for (const role of uniqueRoles) {
+      await db.query(
+        'INSERT INTO user_role(user_id,role_id) SELECT $1,id FROM role WHERE code=$2',
+        [userId, role]
+      );
+    }
+
+    const activeAdmins = await db.query(
+      `SELECT count(*)::int AS n
+      FROM app_user u
+      JOIN user_role ur ON ur.user_id = u.id
+      JOIN role r ON r.id = ur.role_id
+      WHERE u.is_active
+        AND r.code = 'ADMIN'`
+    );
+    if (activeAdmins.rows[0].n < 1) {
+      fail(409, 'LAST_ADMIN', 'At least one active Admin is required');
+    }
+
+    await audit(db, req.user.id, 'USER_ROLES_UPDATED', 'app_user', userId, {
+      roles: uniqueRoles,
+    });
+    return { user_id: userId, roles: uniqueRoles };
+  });
+});
+
+app.patch('/api/v1/users/:id', only('ADMIN'), async (req) => {
+  const userId = id.parse(req.params.id);
+  const input = z
+    .object({
+      display_name: text.optional(),
+      is_active: z.boolean().optional(),
+      password: z.string().min(12).max(200).optional(),
+    })
+    .refine((value) => Object.keys(value).length > 0)
+    .parse(req.body);
+  const assignments = [];
+  const values = [userId];
+
+  for (const [field, column] of [
+    ['display_name', 'display_name'],
+    ['is_active', 'is_active'],
+  ]) {
+    if (input[field] !== undefined) {
+      values.push(input[field]);
+      assignments.push(`${column} = $${values.length}`);
+    }
+  }
+
+  if (input.password) {
+    values.push(await argon2.hash(input.password));
+    assignments.push(`password_hash = $${values.length}`);
+  }
+  assignments.push('updated_at = now()');
+
+  const { rows } = await pool.query(
+    `UPDATE app_user
+    SET ${assignments.join(', ')}
+    WHERE id = $1
+    RETURNING id, username, display_name, is_active`,
+    values
+  );
+  if (!rows[0]) {
+    fail(404, 'NOT_FOUND', 'User not found');
+  }
+
+  await audit(pool, req.user.id, 'USER_UPDATED', 'app_user', userId);
+  return rows[0];
+});
+
+app.get('/api/v1/products', auth, async (req) => {
+  const searchTerm = String(req.query?.q || '').slice(0, 100);
+  const isAdmin = req.user.roles.includes('ADMIN');
+  const productSearchSql = [
+    'SELECT p.id, p.sku, p.barcode, p.name, p.description, p.unit,',
+    'p.is_active, p.item_type, p.tax_classification, p.sc_discount_eligible,',
+    'p.pwd_discount_eligible, p.promotion_basis_points,',
+    'pp.amount price, pp.currency,',
+    'COALESCE(SUM(l.qty_on_hand), 0) qty_on_hand,',
+    "CASE WHEN p.item_type = 'SERVICE' THEN 100000 ELSE",
+    'COALESCE(SUM(l.qty_on_hand) FILTER (',
+    'WHERE l.is_active AND (l.expires_on IS NULL OR l.expires_on >= current_date)',
+    '), 0) END qty_sellable,',
+    'COALESCE(SUM(l.qty_on_hand) FILTER (',
+    'WHERE l.is_active AND l.qty_on_hand > 0',
+    'AND l.expires_on BETWEEN current_date AND current_date + 30',
+    '), 0) qty_expiring_soon,',
+    "COALESCE(jsonb_agg(jsonb_build_object(",
+    "'lot_id', l.id, 'lot_code', l.lot_code, 'expires_on', l.expires_on,",
+    "'qty_on_hand', l.qty_on_hand, 'is_active', l.is_active,",
+    "'is_sellable', (l.is_active AND (l.expires_on IS NULL OR l.expires_on >= current_date)))",
+    'ORDER BY l.expires_on NULLS LAST, l.received_at, l.id',
+    ") FILTER (WHERE l.id IS NOT NULL AND l.qty_on_hand > 0), '[]'::jsonb) lots",
+    'FROM product p',
+    'LEFT JOIN LATERAL (',
+    'SELECT amount, currency FROM product_price',
+    'WHERE product_id = p.id AND effective_from <= now()',
+    'AND (effective_to IS NULL OR effective_to > now())',
+    'ORDER BY effective_from DESC LIMIT 1',
+    ') pp ON true',
+    'LEFT JOIN inventory_lot l ON l.product_id = p.id',
+    'WHERE p.is_active AND (',
+    "$1 = '' OR p.name ILIKE '%' || $1 || '%'",
+    "OR p.sku ILIKE '%' || $1 || '%' OR p.barcode = $1",
+    ')',
+    'GROUP BY p.id, pp.amount, pp.currency',
+    'ORDER BY p.name LIMIT 100',
+  ].join('\n');
+  const { rows } = await pool.query(productSearchSql, [searchTerm]);
+
+  return { items: shapeProductRows(rows, isAdmin) };
 });
 app.post('/api/v1/products', only('ADMIN'), async req => { const v=z.object({sku:text.max(64),barcode:z.string().trim().max(128).nullable().optional(),name:text.max(200),description:z.string().max(2000).nullable().optional(),unit:text.max(24).default('each'),price:z.number().nonnegative().max(99999999),currency:z.string().length(3).regex(/^[A-Z]{3}$/),item_type:z.enum(['PRODUCT','SERVICE']).default('PRODUCT'),tax_classification:z.enum(['UNCLASSIFIED','VATABLE','VAT_EXEMPT','ZERO_RATED','NON_VAT']).default('UNCLASSIFIED'),sc_discount_eligible:z.boolean().default(false),pwd_discount_eligible:z.boolean().default(false),promotion_basis_points:z.number().int().min(0).max(10000).default(0)}).parse(req.body); return tx(async db=>{ const p=(await db.query('INSERT INTO product(sku,barcode,name,description,unit,item_type,tax_classification,sc_discount_eligible,pwd_discount_eligible,promotion_basis_points) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',[v.sku,v.barcode||null,v.name,v.description||null,v.unit,v.item_type,v.tax_classification,v.sc_discount_eligible,v.pwd_discount_eligible,v.promotion_basis_points])).rows[0]; await db.query('INSERT INTO product_price(product_id,amount,currency) VALUES($1,$2,$3)',[p.id,v.price,v.currency]); await audit(db,req.user.id,'PRODUCT_CREATED','product',p.id); return p; }); });
 app.patch('/api/v1/products/:id', only('ADMIN'), async req => { const productId=id.parse(req.params.id); const v=z.object({name:text.max(200).optional(),description:z.string().max(2000).nullable().optional(),is_active:z.boolean().optional(),price:z.number().nonnegative().max(99999999).optional(),currency:z.string().length(3).regex(/^[A-Z]{3}$/).optional(),item_type:z.enum(['PRODUCT','SERVICE']).optional(),tax_classification:z.enum(['UNCLASSIFIED','VATABLE','VAT_EXEMPT','ZERO_RATED','NON_VAT']).optional(),sc_discount_eligible:z.boolean().optional(),pwd_discount_eligible:z.boolean().optional(),promotion_basis_points:z.number().int().min(0).max(10000).optional()}).strict().refine(x=>Object.keys(x).length>0).parse(req.body); return tx(async db=>{ const fields=[];const vals=[productId];for(const [k,c] of [['name','name'],['description','description'],['is_active','is_active'],['item_type','item_type'],['tax_classification','tax_classification'],['sc_discount_eligible','sc_discount_eligible'],['pwd_discount_eligible','pwd_discount_eligible'],['promotion_basis_points','promotion_basis_points']])if(v[k]!==undefined){vals.push(v[k]);fields.push(`${c}=$${vals.length}`)}let p;if(fields.length){fields.push('updated_at=now()');p=(await db.query(`UPDATE product SET ${fields.join(',')} WHERE id=$1 RETURNING *`,vals)).rows[0]}else p=(await db.query('SELECT * FROM product WHERE id=$1',[productId])).rows[0];if(!p)fail(404,'NOT_FOUND','Product not found');if(v.price!==undefined){const cur=v.currency||(await db.query('SELECT currency FROM product_price WHERE product_id=$1 AND effective_to IS NULL ORDER BY effective_from DESC LIMIT 1',[productId])).rows[0]?.currency;if(!cur)fail(400,'CURRENCY_REQUIRED','Provide currency for first price');await db.query('UPDATE product_price SET effective_to=now() WHERE product_id=$1 AND effective_to IS NULL',[productId]);await db.query('INSERT INTO product_price(product_id,amount,currency) VALUES($1,$2,$3)',[productId,v.price,cur])}await audit(db,req.user.id,'PRODUCT_UPDATED','product',productId,{tax_classification:v.tax_classification,sc_discount_eligible:v.sc_discount_eligible,pwd_discount_eligible:v.pwd_discount_eligible,promotion_basis_points:v.promotion_basis_points});return p;}); });
 
 app.get('/api/v1/products/:id/prices', only('ADMIN'), async req => { const productId=id.parse(req.params.id); return {items:(await pool.query('SELECT id,amount,currency,effective_from,effective_to FROM product_price WHERE product_id=$1 ORDER BY effective_from DESC LIMIT 100',[productId])).rows}; });
 app.post('/api/v1/products/:id/prices', only('ADMIN'), async req => { const productId=id.parse(req.params.id); const v=z.object({amount:z.number().nonnegative().max(99999999),currency:z.string().length(3).regex(/^[A-Z]{3}$/)}).parse(req.body); return tx(async db=>{const p=(await db.query('SELECT id FROM product WHERE id=$1 FOR UPDATE',[productId])).rows[0];if(!p)fail(404,'NOT_FOUND','Product not found');await db.query('UPDATE product_price SET effective_to=now() WHERE product_id=$1 AND effective_to IS NULL',[productId]);const price=(await db.query('INSERT INTO product_price(product_id,amount,currency) VALUES($1,$2,$3) RETURNING *',[productId,v.amount,v.currency])).rows[0];await audit(db,req.user.id,'PRODUCT_PRICE_CHANGED','product',productId,{amount:v.amount,currency:v.currency});return price;}); });
-app.get('/api/v1/suppliers', only('ADMIN'), async()=>({items:(await pool.query('SELECT * FROM supplier WHERE is_active ORDER BY name LIMIT 200')).rows}));
-app.post('/api/v1/suppliers', only('ADMIN'), async req=>{const v=z.object({name:text.max(200),contact_name:z.string().max(200).optional(),phone:z.string().max(40).optional(),email:z.string().email().max(200).optional()}).parse(req.body);const s=(await pool.query('INSERT INTO supplier(name,contact_name,phone,email) VALUES($1,$2,$3,$4) RETURNING *',[v.name,v.contact_name||null,v.phone||null,v.email||null])).rows[0];await audit(pool,req.user.id,'SUPPLIER_CREATED','supplier',s.id);return s;});
-app.patch('/api/v1/suppliers/:id', only('ADMIN'), async req => { const supplierId=id.parse(req.params.id); const v=z.object({name:text.max(200).optional(),contact_name:z.string().max(200).nullable().optional(),phone:z.string().max(40).nullable().optional(),email:z.string().email().max(200).nullable().optional(),is_active:z.boolean().optional()}).refine(x=>Object.keys(x).length>0).parse(req.body); const fields=[]; const vals=[supplierId]; for(const [k,c] of [['name','name'],['contact_name','contact_name'],['phone','phone'],['email','email'],['is_active','is_active']]) if(v[k]!==undefined){vals.push(v[k]);fields.push(c+'='+String.fromCharCode(36)+(vals.length));} const sql='UPDATE supplier SET '+fields.join(',')+' WHERE id='+String.fromCharCode(36)+'1 RETURNING *'; const {rows}=await pool.query(sql,vals); if(!rows[0])fail(404,'NOT_FOUND','Supplier not found'); await audit(pool,req.user.id,'SUPPLIER_UPDATED','supplier',supplierId); return rows[0]; });
-app.post('/api/v1/inventory/receipts', only('ADMIN'), async req=>{const v=z.object({product_id:id,supplier_id:id.nullable().optional(),lot_code:text.max(120),expires_on:z.string().date().nullable().optional(),unit_cost:z.number().nonnegative(),quantity:z.number().positive().max(10000000)}).parse(req.body);return tx(async db=>{const lot=(await db.query('INSERT INTO inventory_lot(product_id,supplier_id,lot_code,expires_on,unit_cost,qty_received,qty_on_hand) VALUES($1,$2,$3,$4,$5,$6,$6) RETURNING *',[v.product_id,v.supplier_id||null,v.lot_code,v.expires_on||null,v.unit_cost,v.quantity])).rows[0];await db.query("INSERT INTO stock_movement(product_id,lot_id,movement_type,quantity_delta,reference_type,reference_id,actor_user_id) VALUES($1,$2,'RECEIPT',$3,'LOT',$2,$4)",[v.product_id,lot.id,v.quantity,req.user.id]);await audit(db,req.user.id,'STOCK_RECEIVED','inventory_lot',lot.id);return lot;});});
-app.post('/api/v1/inventory/adjustments', only('ADMIN'), async req=>{const v=z.object({lot_id:id,quantity_delta:z.number().refine(n=>n!==0),reason:text.max(500)}).parse(req.body);return tx(async db=>{const l=(await db.query('SELECT * FROM inventory_lot WHERE id=$1 FOR UPDATE',[v.lot_id])).rows[0];if(!l)fail(404,'NOT_FOUND','Lot not found');const qty=Number(l.qty_on_hand)+v.quantity_delta;if(qty<0)fail(409,'INVALID_STOCK','Adjustment would create invalid quantity');await db.query('UPDATE inventory_lot SET qty_on_hand=$2 WHERE id=$1',[l.id,qty]);const typ=v.quantity_delta>0?'ADJUSTMENT_IN':'ADJUSTMENT_OUT';await db.query('INSERT INTO stock_movement(product_id,lot_id,movement_type,quantity_delta,reason,actor_user_id) VALUES($1,$2,$3,$4,$5,$6)',[l.product_id,l.id,typ,v.quantity_delta,v.reason,req.user.id]);await audit(db,req.user.id,'STOCK_ADJUSTED','inventory_lot',l.id,{quantity_delta:v.quantity_delta,reason:v.reason});return {lot_id:l.id,qty_on_hand:qty};});});
-app.get('/api/v1/inventory/expiring', only('ADMIN'), async req=>{const days=Math.min(365,Math.max(0,Number(req.query?.days||30)));return {items:(await pool.query("SELECT l.*,p.sku,p.name FROM inventory_lot l JOIN product p ON p.id=l.product_id WHERE l.is_active AND l.qty_on_hand>0 AND l.expires_on BETWEEN current_date AND current_date+$1::int ORDER BY l.expires_on",[days])).rows};});
-
-app.get('/api/v1/inventory/movements', only('ADMIN'), async req=>{
- const q=z.object({product_id:id.optional(),lot_id:id.optional(),movement_type:z.enum(['RECEIPT','SALE','ADJUSTMENT_IN','ADJUSTMENT_OUT','REVERSAL']).optional(),from:z.string().date().optional(),to:z.string().date().optional(),limit:z.coerce.number().int().min(1).max(200).default(100),offset:z.coerce.number().int().min(0).default(0)}).parse(req.query);
- if(q.from&&q.to&&q.from>q.to)fail(400,'INVALID_DATE_RANGE','from must be on or before to');
- const {rows}=await pool.query("SELECT m.id,m.product_id,p.sku,p.name product_name,m.lot_id,l.lot_code,l.expires_on,m.movement_type,m.quantity_delta,m.reference_type,m.reference_id,m.reason,m.actor_user_id,u.username actor_username,m.occurred_at FROM stock_movement m JOIN product p ON p.id=m.product_id LEFT JOIN inventory_lot l ON l.id=m.lot_id LEFT JOIN app_user u ON u.id=m.actor_user_id WHERE ($1::uuid IS NULL OR m.product_id=$1::uuid) AND ($2::uuid IS NULL OR m.lot_id=$2::uuid) AND ($3::text IS NULL OR m.movement_type=$3) AND ($4::date IS NULL OR m.occurred_at >= $4::date) AND ($5::date IS NULL OR m.occurred_at < ($5::date + interval '1 day')) ORDER BY m.occurred_at DESC,m.id DESC LIMIT $6 OFFSET $7",[q.product_id||null,q.lot_id||null,q.movement_type||null,q.from||null,q.to||null,q.limit,q.offset]);
- return {items:rows,page:{limit:q.limit,offset:q.offset}};
-});
-function reportRange(query){const parsed=z.object({from:z.string().date().optional(),to:z.string().date().optional()}).parse(query);const today=new Date().toISOString().slice(0,10);const from=parsed.from||new Date(Date.now()-29*86400000).toISOString().slice(0,10);const to=parsed.to||today;if(from>to)fail(400,'INVALID_DATE_RANGE','from must be on or before to');if((Date.parse(to)-Date.parse(from))/86400000>365)fail(400,'DATE_RANGE_TOO_LARGE','Report range cannot exceed 366 days');return {from,to};}
-app.get('/api/v1/reports/sales', only('ADMIN'), async req=>{
- const {from,to}=reportRange(req.query);
- const totals=(await pool.query("SELECT count(*) FILTER(WHERE status='COMPLETED')::int completed_count,count(*) FILTER(WHERE status='VOIDED')::int voided_count,COALESCE(sum(total) FILTER(WHERE status='COMPLETED'),0) completed_total,COALESCE(sum(discount_total) FILTER(WHERE status='COMPLETED'),0) discount_total,COALESCE(sum(tax_total) FILTER(WHERE status='COMPLETED'),0) tax_total,currency FROM sale WHERE created_at >= $1::date AND created_at < ($2::date + interval '1 day') GROUP BY currency",[from,to])).rows;
- const byDay=(await pool.query("SELECT created_at::date sale_date,currency,count(*)::int sale_count,sum(total) total FROM sale WHERE status='COMPLETED' AND created_at >= $1::date AND created_at < ($2::date + interval '1 day') GROUP BY created_at::date,currency ORDER BY sale_date,currency",[from,to])).rows;
- const transactions=(await pool.query("SELECT s.id,s.created_at,u.display_name cashier,p.method payment_method,s.total,p.tendered_amount,p.change_amount,s.currency FROM sale s JOIN app_user u ON u.id=s.cashier_user_id LEFT JOIN payment p ON p.sale_id=s.id AND p.status IN ('CAPTURED','REFUNDED') WHERE s.status='COMPLETED' AND s.created_at >= $1::date AND s.created_at < ($2::date + interval '1 day') ORDER BY s.created_at DESC,s.id,p.received_at",[from,to])).rows;
- return {from,to,totals,by_day:byDay,transactions};
-});
-app.get('/api/v1/reports/stock', only('ADMIN'), async req=>{
- const q=z.object({expiring_days:z.coerce.number().int().min(0).max(365).default(30)}).parse(req.query);
- const {rows}=await pool.query("SELECT p.id product_id,p.sku,p.name,p.unit,p.is_active,COALESCE(sum(l.qty_on_hand),0) qty_on_hand,CASE WHEN p.item_type='SERVICE' THEN 100000 ELSE COALESCE(sum(l.qty_on_hand) FILTER(WHERE l.is_active AND (l.expires_on IS NULL OR l.expires_on>=current_date)),0) END qty_sellable,COALESCE(sum(l.qty_on_hand) FILTER(WHERE l.expires_on<current_date),0) qty_expired,COALESCE(sum(l.qty_on_hand) FILTER(WHERE l.expires_on BETWEEN current_date AND current_date+$1::int),0) qty_expiring_soon,COALESCE(sum(l.qty_on_hand*l.unit_cost),0) value_at_cost,count(l.id) FILTER(WHERE l.qty_on_hand>0)::int lot_count FROM product p LEFT JOIN inventory_lot l ON l.product_id=p.id GROUP BY p.id ORDER BY p.name",[q.expiring_days]);
- return {expiring_days:q.expiring_days,items:rows};
+app.get('/api/v1/suppliers', only('ADMIN'), async () => {
+  const { rows } = await pool.query(
+    'SELECT * FROM supplier WHERE is_active ORDER BY name LIMIT 200'
+  );
+  return { items: rows };
 });
 
-app.post('/api/v1/sales/quote', only('ADMIN','CASHIER'), async req=>{
- const input=z.object({items:z.array(z.object({product_id:id,quantity:z.number().positive().max(100000)}).strict()).min(1).max(100),currency:z.string().length(3).regex(/^[A-Z]{3}$/),discount_type:z.enum(['SC','PWD']).nullable().optional()}).strict().parse(req.body);
- const configuration=(await pool.query('SELECT * FROM tax_configuration WHERE id=1')).rows[0];const items=[];
- for(const entry of input.items){const p=(await pool.query("SELECT p.id,p.item_type,p.tax_classification,p.sc_discount_eligible,p.pwd_discount_eligible,p.promotion_basis_points,pp.amount,pp.currency FROM product p JOIN LATERAL(SELECT amount,currency FROM product_price WHERE product_id=p.id AND effective_from<=now() AND (effective_to IS NULL OR effective_to>now()) ORDER BY effective_from DESC LIMIT 1) pp ON true WHERE p.id=$1 AND p.is_active",[entry.product_id])).rows[0];if(!p)fail(409,'PRODUCT_UNAVAILABLE','Product is unavailable');if(p.currency!==input.currency)fail(409,'CURRENCY_MISMATCH','Sale currency does not match product price');items.push({...entry,unit_price:p.amount,tax_classification:p.tax_classification,sc_discount_eligible:p.sc_discount_eligible,pwd_discount_eligible:p.pwd_discount_eligible,promotion_basis_points:p.promotion_basis_points});}
- try{const quote=calculateSale({items,configuration,discountType:input.discount_type||null});return {...quote,lines:quote.lines.map((line,index)=>({...line,sc_discount_eligible:items[index].sc_discount_eligible,pwd_discount_eligible:items[index].pwd_discount_eligible}))};}catch(error){if(error.code==='TAX_CONFIGURATION_REQUIRED')fail(409,error.code,error.message);fail(400,'INVALID_PRICING_CONFIGURATION',error.message);}
+app.post('/api/v1/suppliers', only('ADMIN'), async (req) => {
+  const input = z
+    .object({
+      name: text.max(200),
+      contact_name: z.string().max(200).optional(),
+      phone: z.string().max(40).optional(),
+      email: z.string().email().max(200).optional(),
+    })
+    .parse(req.body);
+  const supplier = (
+    await pool.query(
+      'INSERT INTO supplier(name,contact_name,phone,email) VALUES($1,$2,$3,$4) RETURNING *',
+      [input.name, input.contact_name || null, input.phone || null, input.email || null]
+    )
+  ).rows[0];
+
+  await audit(pool, req.user.id, 'SUPPLIER_CREATED', 'supplier', supplier.id);
+  return supplier;
+});
+
+app.patch('/api/v1/suppliers/:id', only('ADMIN'), async (req) => {
+  const supplierId = id.parse(req.params.id);
+  const input = z
+    .object({
+      name: text.max(200).optional(),
+      contact_name: z.string().max(200).nullable().optional(),
+      phone: z.string().max(40).nullable().optional(),
+      email: z.string().email().max(200).nullable().optional(),
+      is_active: z.boolean().optional(),
+    })
+    .refine((value) => Object.keys(value).length > 0)
+    .parse(req.body);
+  const assignments = [];
+  const values = [supplierId];
+
+  for (const [field, column] of [
+    ['name', 'name'],
+    ['contact_name', 'contact_name'],
+    ['phone', 'phone'],
+    ['email', 'email'],
+    ['is_active', 'is_active'],
+  ]) {
+    if (input[field] !== undefined) {
+      values.push(input[field]);
+      assignments.push(column + ' = $' + values.length);
+    }
+  }
+
+  const sql =
+    'UPDATE supplier SET ' +
+    assignments.join(', ') +
+    ' WHERE id = $1 RETURNING *';
+  const { rows } = await pool.query(sql, values);
+  if (!rows[0]) {
+    fail(404, 'NOT_FOUND', 'Supplier not found');
+  }
+
+  await audit(pool, req.user.id, 'SUPPLIER_UPDATED', 'supplier', supplierId);
+  return rows[0];
+});
+
+app.post('/api/v1/inventory/receipts', only('ADMIN'), async (req) => {
+  const receipt = z
+    .object({
+      product_id: id,
+      supplier_id: id.nullable().optional(),
+      lot_code: text.max(120),
+      expires_on: z.string().date().nullable().optional(),
+      unit_cost: z.number().nonnegative(),
+      quantity: z.number().positive().max(10000000),
+    })
+    .parse(req.body);
+
+  return tx(async (db) => {
+    const lot = (
+      await db.query(
+        `INSERT INTO inventory_lot (
+          product_id, supplier_id, lot_code, expires_on, unit_cost,
+          qty_received, qty_on_hand
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $6)
+        RETURNING *`,
+        [
+          receipt.product_id,
+          receipt.supplier_id || null,
+          receipt.lot_code,
+          receipt.expires_on || null,
+          receipt.unit_cost,
+          receipt.quantity,
+        ]
+      )
+    ).rows[0];
+    await db.query(
+      "INSERT INTO stock_movement(product_id,lot_id,movement_type,quantity_delta,reference_type,reference_id,actor_user_id) VALUES($1,$2,'RECEIPT',$3,'LOT',$2,$4)",
+      [receipt.product_id, lot.id, receipt.quantity, req.user.id]
+    );
+    await audit(db, req.user.id, 'STOCK_RECEIVED', 'inventory_lot', lot.id);
+    return lot;
+  });
+});
+
+app.post('/api/v1/inventory/adjustments', only('ADMIN'), async (req) => {
+  const adjustment = z
+    .object({
+      lot_id: id,
+      quantity_delta: z.number().refine((quantity) => quantity !== 0),
+      reason: text.max(500),
+    })
+    .parse(req.body);
+
+  return tx(async (db) => {
+    const lot = (
+      await db.query('SELECT * FROM inventory_lot WHERE id = $1 FOR UPDATE', [
+        adjustment.lot_id,
+      ])
+    ).rows[0];
+    if (!lot) {
+      fail(404, 'NOT_FOUND', 'Lot not found');
+    }
+
+    const newQuantity = Number(lot.qty_on_hand) + adjustment.quantity_delta;
+    if (newQuantity < 0) {
+      fail(409, 'INVALID_STOCK', 'Adjustment would create invalid quantity');
+    }
+
+    await db.query('UPDATE inventory_lot SET qty_on_hand = $2 WHERE id = $1', [
+      lot.id,
+      newQuantity,
+    ]);
+    const movementType =
+      adjustment.quantity_delta > 0 ? 'ADJUSTMENT_IN' : 'ADJUSTMENT_OUT';
+    await db.query(
+      'INSERT INTO stock_movement(product_id,lot_id,movement_type,quantity_delta,reason,actor_user_id) VALUES($1,$2,$3,$4,$5,$6)',
+      [
+        lot.product_id,
+        lot.id,
+        movementType,
+        adjustment.quantity_delta,
+        adjustment.reason,
+        req.user.id,
+      ]
+    );
+    await audit(db, req.user.id, 'STOCK_ADJUSTED', 'inventory_lot', lot.id, {
+      quantity_delta: adjustment.quantity_delta,
+      reason: adjustment.reason,
+    });
+    return { lot_id: lot.id, qty_on_hand: newQuantity };
+  });
+});
+
+app.get('/api/v1/inventory/expiring', only('ADMIN'), async (req) => {
+  const days = Math.min(365, Math.max(0, Number(req.query?.days || 30)));
+  const { rows } = await pool.query(
+    `SELECT l.*, p.sku, p.name
+    FROM inventory_lot l
+    JOIN product p ON p.id = l.product_id
+    WHERE l.is_active
+      AND l.qty_on_hand > 0
+      AND l.expires_on BETWEEN current_date AND current_date + $1::int
+    ORDER BY l.expires_on`,
+    [days]
+  );
+  return { items: rows };
+});
+
+app.get('/api/v1/inventory/movements', only('ADMIN'), async (req) => {
+  const query = z
+    .object({
+      product_id: id.optional(),
+      lot_id: id.optional(),
+      movement_type: z
+        .enum(['RECEIPT', 'SALE', 'ADJUSTMENT_IN', 'ADJUSTMENT_OUT', 'REVERSAL'])
+        .optional(),
+      from: z.string().date().optional(),
+      to: z.string().date().optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(100),
+      offset: z.coerce.number().int().min(0).default(0),
+    })
+    .parse(req.query);
+
+  if (query.from && query.to && query.from > query.to) {
+    fail(400, 'INVALID_DATE_RANGE', 'from must be on or before to');
+  }
+
+  const { rows } = await pool.query(
+    `SELECT
+      m.id,
+      m.product_id,
+      p.sku,
+      p.name AS product_name,
+      m.lot_id,
+      l.lot_code,
+      l.expires_on,
+      m.movement_type,
+      m.quantity_delta,
+      m.reference_type,
+      m.reference_id,
+      m.reason,
+      m.actor_user_id,
+      u.username AS actor_username,
+      m.occurred_at
+    FROM stock_movement m
+    JOIN product p ON p.id = m.product_id
+    LEFT JOIN inventory_lot l ON l.id = m.lot_id
+    LEFT JOIN app_user u ON u.id = m.actor_user_id
+    WHERE ($1::uuid IS NULL OR m.product_id = $1::uuid)
+      AND ($2::uuid IS NULL OR m.lot_id = $2::uuid)
+      AND ($3::text IS NULL OR m.movement_type = $3)
+      AND ($4::date IS NULL OR m.occurred_at >= $4::date)
+      AND (
+        $5::date IS NULL
+        OR m.occurred_at < ($5::date + interval '1 day')
+      )
+    ORDER BY m.occurred_at DESC, m.id DESC
+    LIMIT $6 OFFSET $7`,
+    [
+      query.product_id || null,
+      query.lot_id || null,
+      query.movement_type || null,
+      query.from || null,
+      query.to || null,
+      query.limit,
+      query.offset,
+    ]
+  );
+
+  return { items: rows, page: { limit: query.limit, offset: query.offset } };
+});
+
+function reportRange(query) {
+  const parsed = z
+    .object({
+      from: z.string().date().optional(),
+      to: z.string().date().optional(),
+    })
+    .parse(query);
+  const today = new Date().toISOString().slice(0, 10);
+  const from =
+    parsed.from || new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  const to = parsed.to || today;
+
+  if (from > to) {
+    fail(400, 'INVALID_DATE_RANGE', 'from must be on or before to');
+  }
+  if ((Date.parse(to) - Date.parse(from)) / 86400000 > 365) {
+    fail(400, 'DATE_RANGE_TOO_LARGE', 'Report range cannot exceed 366 days');
+  }
+  return { from, to };
+}
+
+app.get('/api/v1/reports/sales', only('ADMIN'), async (req) => {
+  const { from, to } = reportRange(req.query);
+  const totals = (
+    await pool.query(
+      `SELECT
+        count(*) FILTER (WHERE status = 'COMPLETED')::int AS completed_count,
+        count(*) FILTER (WHERE status = 'VOIDED')::int AS voided_count,
+        COALESCE(sum(total) FILTER (WHERE status = 'COMPLETED'), 0) AS completed_total,
+        COALESCE(sum(discount_total) FILTER (WHERE status = 'COMPLETED'), 0) AS discount_total,
+        COALESCE(sum(tax_total) FILTER (WHERE status = 'COMPLETED'), 0) AS tax_total,
+        currency
+      FROM sale
+      WHERE created_at >= $1::date
+        AND created_at < ($2::date + interval '1 day')
+      GROUP BY currency`,
+      [from, to]
+    )
+  ).rows;
+  const byDay = (
+    await pool.query(
+      `SELECT
+        created_at::date AS sale_date,
+        currency,
+        count(*)::int AS sale_count,
+        sum(total) AS total
+      FROM sale
+      WHERE status = 'COMPLETED'
+        AND created_at >= $1::date
+        AND created_at < ($2::date + interval '1 day')
+      GROUP BY created_at::date, currency
+      ORDER BY sale_date, currency`,
+      [from, to]
+    )
+  ).rows;
+  const transactions = (
+    await pool.query(
+      `SELECT
+        s.id,
+        s.created_at,
+        u.display_name AS cashier,
+        p.method AS payment_method,
+        s.total,
+        p.tendered_amount,
+        p.change_amount,
+        s.currency
+      FROM sale s
+      JOIN app_user u ON u.id = s.cashier_user_id
+      LEFT JOIN payment p
+        ON p.sale_id = s.id
+        AND p.status IN ('CAPTURED', 'REFUNDED')
+      WHERE s.status = 'COMPLETED'
+        AND s.created_at >= $1::date
+        AND s.created_at < ($2::date + interval '1 day')
+      ORDER BY s.created_at DESC, s.id, p.received_at`,
+      [from, to]
+    )
+  ).rows;
+
+  return { from, to, totals, by_day: byDay, transactions };
+});
+
+app.get('/api/v1/reports/stock', only('ADMIN'), async (req) => {
+  const query = z
+    .object({
+      expiring_days: z.coerce.number().int().min(0).max(365).default(30),
+    })
+    .parse(req.query);
+  const { rows } = await pool.query(
+    `SELECT
+      p.id AS product_id,
+      p.sku,
+      p.name,
+      p.unit,
+      p.is_active,
+      COALESCE(sum(l.qty_on_hand), 0) AS qty_on_hand,
+      CASE
+        WHEN p.item_type = 'SERVICE' THEN 100000
+        ELSE COALESCE(
+          sum(l.qty_on_hand) FILTER (
+            WHERE l.is_active
+              AND (l.expires_on IS NULL OR l.expires_on >= current_date)
+          ),
+          0
+        )
+      END AS qty_sellable,
+      COALESCE(sum(l.qty_on_hand) FILTER (WHERE l.expires_on < current_date), 0) AS qty_expired,
+      COALESCE(
+        sum(l.qty_on_hand) FILTER (
+          WHERE l.expires_on BETWEEN current_date AND current_date + $1::int
+        ),
+        0
+      ) AS qty_expiring_soon,
+      COALESCE(sum(l.qty_on_hand * l.unit_cost), 0) AS value_at_cost,
+      count(l.id) FILTER (WHERE l.qty_on_hand > 0)::int AS lot_count
+    FROM product p
+    LEFT JOIN inventory_lot l ON l.product_id = p.id
+    GROUP BY p.id
+    ORDER BY p.name`,
+    [query.expiring_days]
+  );
+  return { expiring_days: query.expiring_days, items: rows };
+});
+
+app.post('/api/v1/sales/quote', only('ADMIN', 'CASHIER'), async (req) => {
+  const input = z
+    .object({
+      items: z
+        .array(
+          z
+            .object({
+              product_id: id,
+              quantity: z.number().positive().max(100000),
+            })
+            .strict()
+        )
+        .min(1)
+        .max(100),
+      currency: z.string().length(3).regex(/^[A-Z]{3}$/),
+      discount_type: z.enum(['SC', 'PWD']).nullable().optional(),
+    })
+    .strict()
+    .parse(req.body);
+  const configuration = (
+    await pool.query('SELECT * FROM tax_configuration WHERE id = 1')
+  ).rows[0];
+  const items = [];
+
+  for (const entry of input.items) {
+    const product = (
+      await pool.query(
+        'SELECT p.id, p.item_type, p.tax_classification, ' +
+          'p.sc_discount_eligible, p.pwd_discount_eligible, ' +
+          'p.promotion_basis_points, pp.amount, pp.currency ' +
+          'FROM product p ' +
+          'JOIN LATERAL ( ' +
+          'SELECT amount, currency FROM product_price ' +
+          'WHERE product_id = p.id AND effective_from <= now() ' +
+          'AND (effective_to IS NULL OR effective_to > now()) ' +
+          'ORDER BY effective_from DESC LIMIT 1' +
+          ') pp ON true ' +
+          'WHERE p.id = $1 AND p.is_active',
+        [entry.product_id]
+      )
+    ).rows[0];
+
+    if (!product) {
+      fail(409, 'PRODUCT_UNAVAILABLE', 'Product is unavailable');
+    }
+    if (product.currency !== input.currency) {
+      fail(409, 'CURRENCY_MISMATCH', 'Sale currency does not match product price');
+    }
+
+    items.push({
+      ...entry,
+      unit_price: product.amount,
+      tax_classification: product.tax_classification,
+      sc_discount_eligible: product.sc_discount_eligible,
+      pwd_discount_eligible: product.pwd_discount_eligible,
+      promotion_basis_points: product.promotion_basis_points,
+    });
+  }
+
+  try {
+    const quote = calculateSale({
+      items,
+      configuration,
+      discountType: input.discount_type || null,
+    });
+    return {
+      ...quote,
+      lines: quote.lines.map((line, index) => ({
+        ...line,
+        sc_discount_eligible: items[index].sc_discount_eligible,
+        pwd_discount_eligible: items[index].pwd_discount_eligible,
+      })),
+    };
+  } catch (error) {
+    if (error.code === 'TAX_CONFIGURATION_REQUIRED') {
+      fail(409, error.code, error.message);
+    }
+    fail(400, 'INVALID_PRICING_CONFIGURATION', error.message);
+  }
 });
 
 app.post('/api/v1/sales', only('ADMIN','CASHIER'), async req=>{
  const idem=String(req.headers['idempotency-key']||'');if(idem.length<8||idem.length>200)fail(400,'IDEMPOTENCY_KEY_REQUIRED','Provide an Idempotency-Key header');
  const v=parseSaleInput(req.body);
  const requestHash=tokenHash(canonicalJson(v));
- return tx(async db=>{await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`${req.user.id}:sales:${idem}`]);const old=(await db.query('SELECT request_hash,response_json FROM idempotency_record WHERE cashier_user_id=$1 AND endpoint=$2 AND idempotency_key=$3',[req.user.id,'POST /sales',idem])).rows[0];if(old){if(old.request_hash!==requestHash)fail(409,'IDEMPOTENCY_KEY_REUSED','Key was used with a different request');return old.response_json;}
+ return tx(async db=>{
+  // Serialize retries for this cashier and key before reading or creating the saved response.
+  await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`${req.user.id}:sales:${idem}`]);const old=(await db.query('SELECT request_hash,response_json FROM idempotency_record WHERE cashier_user_id=$1 AND endpoint=$2 AND idempotency_key=$3',[req.user.id,'POST /sales',idem])).rows[0];if(old){if(old.request_hash!==requestHash)fail(409,'IDEMPOTENCY_KEY_REUSED','Key was used with a different request');return old.response_json;}
   const configuration=(await db.query('SELECT * FROM tax_configuration WHERE id=1 FOR SHARE')).rows[0];
   const lines=[];for(const item of v.items){const p=(await db.query("SELECT p.id,p.sku,p.name,p.item_type,p.tax_classification,p.sc_discount_eligible,p.pwd_discount_eligible,p.promotion_basis_points,pp.amount,pp.currency FROM product p JOIN LATERAL(SELECT amount,currency FROM product_price WHERE product_id=p.id AND effective_from<=now() AND (effective_to IS NULL OR effective_to>now()) ORDER BY effective_from DESC LIMIT 1) pp ON true WHERE p.id=$1 AND p.is_active FOR SHARE OF p",[item.product_id])).rows[0];if(!p)fail(409,'PRODUCT_UNAVAILABLE','Product is unavailable');if(p.currency!==v.currency)fail(409,'CURRENCY_MISMATCH','Sale currency does not match product price');lines.push({...item,p,unit_price:p.amount});}
   let priced;try{priced=calculateSale({items:lines.map(line=>({unit_price:line.unit_price,quantity:line.quantity,tax_classification:line.p.tax_classification,sc_discount_eligible:line.p.sc_discount_eligible,pwd_discount_eligible:line.p.pwd_discount_eligible,promotion_basis_points:line.p.promotion_basis_points})),configuration,discountType:v.discount?.type||null});}catch(error){if(error.code==='TAX_CONFIGURATION_REQUIRED')fail(409,error.code,error.message);fail(400,'INVALID_PRICING_CONFIGURATION',error.message);}
   if(v.discount&&!priced.statutory_discount_type){const eligible=lines.some(line=>line.p[v.discount.type==='SC'?'sc_discount_eligible':'pwd_discount_eligible']);fail(409,'STATUTORY_DISCOUNT_NOT_APPLIED',eligible?'An applicable promotion gives a lower payable amount for the eligible items, so the statutory benefit does not apply.':`No ${v.discount.type==='SC'?'Senior Citizen':'PWD'}-eligible items are currently in this sale.`);}
   const paymentTotals=assertPaymentTotal(v.payments,priced.total);
   const appliedStatutory=priced.statutory_discount_type;const invoice=`I-${new Date().toISOString().slice(0,10).replaceAll('-','')}-${randomUUID().slice(0,8).toUpperCase()}`;const taxSnapshot={registration_type:configuration.registration_type,vat_rate_basis_points:configuration.vat_rate_basis_points,pricing_mode:configuration.pricing_mode,registered_name:configuration.registered_name,trade_name:configuration.trade_name,tin:configuration.tin,branch_code:configuration.branch_code,registered_address:configuration.registered_address,effective_from:configuration.effective_from,permit_to_use_number:configuration.permit_to_use_number,permit_to_use_date:configuration.permit_to_use_date,authority_to_print_number:configuration.authority_to_print_number,authority_to_print_date:configuration.authority_to_print_date,approved_serial_numbers:configuration.approved_serial_numbers};const discountSnapshot={type:priced.discount_type,statutory_type:appliedStatutory,applied:priced.discount_type!==null,lines:priced.lines.map(line=>({type:line.discount_type,amount:line.discount_amount}))};const sale=(await db.query("INSERT INTO sale(receipt_number,invoice_number,status,cashier_user_id,customer_name_snapshot,subtotal,discount_total,tax_total,total,taxable_total,vat_exempt_total,zero_rated_total,currency,tax_snapshot,discount_snapshot,statutory_discount_type,statutory_customer_name,statutory_id_number) VALUES($1,$1,'PENDING',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL,NULL) RETURNING *",[invoice,req.user.id,v.customer_name||null,priced.subtotal,priced.discount_total,priced.tax_total,priced.total,fromCents(priced.lines.reduce((n,l)=>n+Number(toCents(l.taxable_amount)),0)),fromCents(priced.lines.reduce((n,l)=>n+Number(toCents(l.vat_exempt_amount)),0)),fromCents(priced.lines.reduce((n,l)=>n+Number(toCents(l.zero_rated_amount)),0)),v.currency,JSON.stringify(taxSnapshot),JSON.stringify(discountSnapshot),appliedStatutory])).rows[0];if(appliedStatutory)await db.query('INSERT INTO sale_beneficiary(sale_id,benefit_type,customer_name,id_number) VALUES($1,$2,$3,$4)',[sale.id,appliedStatutory,v.discount.customer_name,v.discount.id_number]);const outItems=[];
-  for(const {i,line} of lines.map((line,i)=>({i,line})).sort((a,b)=>a.line.product_id.localeCompare(b.line.product_id)||a.i-b.i)){const price=priced.lines[i];let remaining=line.quantity;const lots=line.p.item_type==='SERVICE'?[]:(await db.query("SELECT * FROM inventory_lot WHERE product_id=$1 AND is_active AND qty_on_hand>0 AND (expires_on IS NULL OR expires_on>=current_date) ORDER BY expires_on NULLS LAST,received_at,id FOR UPDATE",[line.product_id])).rows;const available=lots.reduce((n,l)=>n+Number(l.qty_on_hand),0);if(line.p.item_type!=='SERVICE'&&available+1e-9<remaining)fail(409,'INSUFFICIENT_STOCK','Insufficient unexpired stock');const si=(await db.query('INSERT INTO sale_item(sale_id,line_no,product_id,sku_snapshot,name_snapshot,quantity,unit_price,line_total,gross_amount,discount_amount,tax_amount,tax_classification,taxable_amount,vat_exempt_amount,zero_rated_amount,discount_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *',[sale.id,i+1,line.product_id,line.p.sku,line.p.name,line.quantity,line.p.amount,price.line_total,price.gross,price.discount_amount,price.tax_amount,price.tax_classification,price.taxable_amount,price.vat_exempt_amount,price.zero_rated_amount,price.discount_type])).rows[0];for(const lot of lots){if(remaining<=0)break;const take=Math.min(remaining,Number(lot.qty_on_hand));await db.query('UPDATE inventory_lot SET qty_on_hand=qty_on_hand-$2 WHERE id=$1',[lot.id,take]);await db.query('INSERT INTO sale_item_lot(sale_item_id,lot_id,quantity) VALUES($1,$2,$3)',[si.id,lot.id,take]);await db.query("INSERT INTO stock_movement(product_id,lot_id,movement_type,quantity_delta,reference_type,reference_id,actor_user_id) VALUES($1,$2,'SALE',$3,'SALE',$4,$5)",[line.product_id,lot.id,-take,sale.id,req.user.id]);remaining-=take;}outItems[i]={id:si.id,sku:si.sku_snapshot,name:si.name_snapshot,quantity:si.quantity,unit_price:si.unit_price,...price,sc_discount_eligible:line.p.sc_discount_eligible,pwd_discount_eligible:line.p.pwd_discount_eligible};}
-  const outPayments=[];for(let index=0;index<v.payments.length;index++){const pay=v.payments[index];const tenderedCents=toCents(pay.amount);const cashOverpay=v.payments.length===1&&pay.method==='CASH';const appliedCents=cashOverpay?paymentTotals.appliedCents:tenderedCents;const changeCents=cashOverpay?paymentTotals.changeCents:0n;const p=(await db.query("INSERT INTO payment(sale_id,method,amount,currency,status,reference,recorded_by,tendered_amount,change_amount) VALUES($1,$2,$3,$4,'CAPTURED',$5,$6,$7,$8) RETURNING id,method,amount,currency,status,reference,received_at,tendered_amount,change_amount",[sale.id,pay.method,fromCents(appliedCents),v.currency,pay.reference||null,req.user.id,fromCents(tenderedCents),fromCents(changeCents)])).rows[0];outPayments.push(p);}
-  await db.query("UPDATE sale SET status='COMPLETED' WHERE id=$1",[sale.id]);const response={id:sale.id,receipt_number:invoice,invoice_number:invoice,status:'COMPLETED',created_at:sale.created_at,cashier:{id:req.user.id,display_name:req.user.display_name},currency:v.currency,...priced,items:outItems,tax_snapshot:taxSnapshot,discount_snapshot:discountSnapshot,statutory_discount_type:appliedStatutory,payments:outPayments};await audit(db,req.user.id,'SALE_COMPLETED','sale',sale.id,{invoice_number:invoice,total:priced.total,currency:v.currency,discount_type:priced.discount_type});await db.query('INSERT INTO idempotency_record(cashier_user_id,endpoint,idempotency_key,request_hash,response_json) VALUES($1,$2,$3,$4,$5)',[req.user.id,'POST /sales',idem,requestHash,JSON.stringify(response)]);return response;
+  // Acquire lot locks in stable product order so overlapping sales do not lock lots oppositely.
+  for (const { i, line } of lines
+    .map((line, i) => ({ i, line }))
+    .sort(
+      (left, right) =>
+        left.line.product_id.localeCompare(right.line.product_id) || left.i - right.i
+    )) {
+    const price = priced.lines[i];
+    let remaining = line.quantity;
+
+    // Lots are ordered FEFO; lots without an expiry date follow dated lots.
+    const lots =
+      line.p.item_type === 'SERVICE'
+        ? []
+        : (
+            await db.query(
+              `SELECT *
+              FROM inventory_lot
+              WHERE product_id = $1
+                AND is_active
+                AND qty_on_hand > 0
+                AND (expires_on IS NULL OR expires_on >= current_date)
+              ORDER BY expires_on NULLS LAST, received_at, id
+              FOR UPDATE`,
+              [line.product_id]
+            )
+          ).rows;
+    const available = lots.reduce((total, lot) => total + Number(lot.qty_on_hand), 0);
+
+    if (line.p.item_type !== 'SERVICE' && available + 1e-9 < remaining) {
+      fail(409, 'INSUFFICIENT_STOCK', 'Insufficient unexpired stock');
+    }
+
+    const saleItem = (
+      await db.query(
+        `INSERT INTO sale_item (
+          sale_id, line_no, product_id, sku_snapshot, name_snapshot,
+          quantity, unit_price, line_total, gross_amount, discount_amount,
+          tax_amount, tax_classification, taxable_amount, vat_exempt_amount,
+          zero_rated_amount, discount_type
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8,
+          $9, $10, $11, $12, $13, $14, $15, $16
+        )
+        RETURNING *`,
+        [
+          sale.id,
+          i + 1,
+          line.product_id,
+          line.p.sku,
+          line.p.name,
+          line.quantity,
+          line.p.amount,
+          price.line_total,
+          price.gross,
+          price.discount_amount,
+          price.tax_amount,
+          price.tax_classification,
+          price.taxable_amount,
+          price.vat_exempt_amount,
+          price.zero_rated_amount,
+          price.discount_type,
+        ]
+      )
+    ).rows[0];
+
+    for (const lot of lots) {
+      if (remaining <= 0) {
+        break;
+      }
+
+      const quantityTaken = Math.min(remaining, Number(lot.qty_on_hand));
+      await db.query(
+        'UPDATE inventory_lot SET qty_on_hand = qty_on_hand - $2 WHERE id = $1',
+        [lot.id, quantityTaken]
+      );
+      await db.query(
+        'INSERT INTO sale_item_lot(sale_item_id,lot_id,quantity) VALUES($1,$2,$3)',
+        [saleItem.id, lot.id, quantityTaken]
+      );
+      await db.query(
+        "INSERT INTO stock_movement(product_id,lot_id,movement_type,quantity_delta,reference_type,reference_id,actor_user_id) VALUES($1,$2,'SALE',$3,'SALE',$4,$5)",
+        [line.product_id, lot.id, -quantityTaken, sale.id, req.user.id]
+      );
+      remaining -= quantityTaken;
+    }
+
+    outItems[i] = {
+      id: saleItem.id,
+      sku: saleItem.sku_snapshot,
+      name: saleItem.name_snapshot,
+      quantity: saleItem.quantity,
+      unit_price: saleItem.unit_price,
+      ...price,
+      sc_discount_eligible: line.p.sc_discount_eligible,
+      pwd_discount_eligible: line.p.pwd_discount_eligible,
+    };
+  }
+  const outPayments = [];
+  for (let paymentIndex = 0; paymentIndex < v.payments.length; paymentIndex += 1) {
+    const payment = v.payments[paymentIndex];
+    const tenderedCents = toCents(payment.amount);
+
+    // Only a single cash tender can exceed the amount applied to the sale.
+    const cashOverpay = v.payments.length === 1 && payment.method === 'CASH';
+    const appliedCents = cashOverpay ? paymentTotals.appliedCents : tenderedCents;
+    const changeCents = cashOverpay ? paymentTotals.changeCents : 0n;
+    const savedPayment = (
+      await db.query(
+        `INSERT INTO payment (
+          sale_id, method, amount, currency, status, reference, recorded_by,
+          tendered_amount, change_amount
+        )
+        VALUES ($1, $2, $3, $4, 'CAPTURED', $5, $6, $7, $8)
+        RETURNING
+          id, method, amount, currency, status, reference, received_at,
+          tendered_amount, change_amount`,
+        [
+          sale.id,
+          payment.method,
+          fromCents(appliedCents),
+          v.currency,
+          payment.reference || null,
+          req.user.id,
+          fromCents(tenderedCents),
+          fromCents(changeCents),
+        ]
+      )
+    ).rows[0];
+    outPayments.push(savedPayment);
+  }
+
+  await db.query("UPDATE sale SET status='COMPLETED' WHERE id=$1", [sale.id]);
+  const response = {
+    id: sale.id,
+    receipt_number: invoice,
+    invoice_number: invoice,
+    status: 'COMPLETED',
+    created_at: sale.created_at,
+    cashier: { id: req.user.id, display_name: req.user.display_name },
+    currency: v.currency,
+    ...priced,
+    items: outItems,
+    tax_snapshot: taxSnapshot,
+    discount_snapshot: discountSnapshot,
+    statutory_discount_type: appliedStatutory,
+    payments: outPayments,
+  };
+
+  await audit(db, req.user.id, 'SALE_COMPLETED', 'sale', sale.id, {
+    invoice_number: invoice,
+    total: priced.total,
+    currency: v.currency,
+    discount_type: priced.discount_type,
+  });
+  await db.query(
+    'INSERT INTO idempotency_record(cashier_user_id,endpoint,idempotency_key,request_hash,response_json) VALUES($1,$2,$3,$4,$5)',
+    [req.user.id, 'POST /sales', idem, requestHash, JSON.stringify(response)]
+  );
+
+  return response;
  });
 });
 app.get('/api/v1/sales', only('ADMIN','CASHIER'), async req=>{const limit=Math.min(100,Math.max(1,Number(req.query?.limit||50)));const isAdmin=req.user.roles.includes('ADMIN');const q=req.query?.q?`%${String(req.query.q).slice(0,80)}%`:null;const {rows}=await pool.query('SELECT id,receipt_number,status,cashier_user_id,subtotal,total,currency,created_at FROM sale WHERE ($1::boolean OR cashier_user_id=$2) AND ($3::text IS NULL OR receipt_number ILIKE $3) ORDER BY created_at DESC,id DESC LIMIT $4',[isAdmin,req.user.id,q,limit]);return {items:rows};});
