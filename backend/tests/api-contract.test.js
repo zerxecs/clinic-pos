@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { parseSaleInput, assertPaymentTotal } from '../src/sales-input.js';
+import { shapeProductRows } from '../src/product-response.js';
 const serverPath=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../src/server.js');
 const server=await readFile(serverPath,'utf8');
 const valid={items:[{product_id:'00000000-0000-4000-8000-000000000001',quantity:1}],payments:[{method:'CASH',amount:12.5}],currency:'PHP'};
@@ -27,11 +28,23 @@ test('sale input validation runs before transaction and payment totals before al
  assert.ok(validated>=0&&transaction>validated,'request validation must precede transaction entry');
  assert.ok(total<saleInsert&&total<stockUpdate&&total<paymentInsert,'payment totals must validate before sale, stock, and payment writes');
 });
-test('missing report and movement endpoints and per-lot product expiry are registered',()=>{
+test('report and movement endpoints are registered',()=>{
  assert.match(server,/app\.get\('\/api\/v1\/inventory\/movements'/);
  assert.match(server,/app\.get\('\/api\/v1\/reports\/sales'/);
  assert.match(server,/app\.get\('\/api\/v1\/reports\/stock'/);
- assert.match(server,/jsonb_agg\(jsonb_build_object\('lot_id',l\.id,'lot_code',l\.lot_code,'expires_on',l\.expires_on/);
+});
+test('product response limits lot details to Admin while preserving cashier totals and expiry warnings',()=>{
+ assert.match(server,/const isAdmin=req\.user\.roles\.includes\('ADMIN'\);/);
+ assert.match(server,/shapeProductRows\(rows,isAdmin\)/);
+ const sample={id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',is_active:true,price:'12.50',currency:'PHP',qty_on_hand:'8',qty_sellable:'5',qty_expiring_soon:'2',lots:[{lot_id:'lot-secret',lot_code:'BATCH-SECRET',expires_on:'2026-10-01',qty_on_hand:'2',is_active:true,is_sellable:true}]};
+ const [cashier]=shapeProductRows([sample],false);
+ assert.deepEqual(cashier,{id:'p-1',sku:'SKU-1',barcode:'123',name:'Medicine',description:null,unit:'each',price:'12.50',currency:'PHP',qty_sellable:'5',expiry_warning:true});
+ for(const key of ['qty_on_hand','lots','is_active','qty_expiring_soon']) assert.equal(Object.hasOwn(cashier,key),false,`cashier must not receive ${key}`);
+ const [admin]=shapeProductRows([sample],true);
+ assert.equal(admin.lots[0].lot_id,'lot-secret');
+ assert.equal(admin.lots[0].lot_code,'BATCH-SECRET');
+ assert.equal(admin.lots[0].expires_on,'2026-10-01');
+ assert.equal(admin.qty_on_hand,'8');
 });
 test('cashier sales list is scoped in SQL while Admin may see all',()=>{
  const line=server.split(/\r?\n/).find(x=>x.startsWith("app.get('/api/v1/sales',"));

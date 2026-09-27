@@ -10,7 +10,8 @@
     "start": "node src/server.js",
     "migrate": "node src/migrate.js",
     "bootstrap:admin": "node src/bootstrap-admin.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:integration": "node --test tests/transaction.integration.test.js"
   },
   "dependencies": {
     "argon2": "^0.41.1",

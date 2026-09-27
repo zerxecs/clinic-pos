@@ -1,6 +1,6 @@
 ﻿# Local setup
 
-Requires Node.js 20+ and PostgreSQL. Create a local database and user, copy `backend/.env.example` to `backend/.env`, set `DATABASE_URL` and a random `ACCESS_TOKEN_SECRET` of at least 32 bytes, then:
+Requires Node.js 20+ and PostgreSQL. Create a local database and user, copy `backend/.env.example` to `backend/.env`, and replace the empty `DATABASE_URL` and `ACCESS_TOKEN_SECRET` values. Set `ACCESS_TOKEN_SECRET` to a unique random value of at least 32 bytes; startup refuses missing, short, or known placeholder values. Never commit `.env` or print secret values. The required operator replacement keys are `DATABASE_URL` and `ACCESS_TOKEN_SECRET`.
 
 ```powershell
 cd D:\pos\clinic-pos\backend
@@ -10,7 +10,7 @@ npm run bootstrap:admin
 npm start
 ```
 
-The API listens on `http://127.0.0.1:3000`; check `/health`. No default admin or clinic catalog is seeded. The one-time bootstrap command prompts for the first Admin credentials and refuses to create another active Admin if one already exists. Do not expose the service publicly until configured.
+The API listens on `http://127.0.0.1:3000`; check `/health`. No default admin or clinic catalog is seeded. The one-time bootstrap command refuses to create another active Admin if one already exists. It reads `ADMIN_USERNAME`, `ADMIN_DISPLAY_NAME`, and `ADMIN_PASSWORD` from the environment, or prompts for username/display name and a hidden password. For unattended setup, provide all three variables for the command only; never save or log their values. The bootstrap password must be 12 to 200 characters and is stored as an Argon2id hash. Unset the three bootstrap variables after use. Do not expose the service publicly until configured.
 
 ## Notes
 

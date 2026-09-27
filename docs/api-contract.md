@@ -11,7 +11,7 @@ JSON REST API under `/api/v1`; request validation at the boundary, stable error 
 ## Catalog and inventory
 
 - `GET/POST /products`, `GET/PATCH /products/{id}`, `GET/POST /products/{id}/prices`; search accepts text and exact SKU/barcode.
-- Product availability includes `qty_on_hand`, `qty_sellable` (unexpired and active lots), and lot summaries with expiry dates. Cashier sees sellable totals and expiry warnings; Admin may inspect all lots.
+- Product search returns active catalog details and `qty_sellable` (unexpired and active lots) to Cashiers, plus an `expiry_warning` when sellable stock expires within 30 days. Cashier responses omit raw on-hand totals, lot summaries, and lot-level status. Admin responses retain `qty_on_hand` and lot details for inventory inspection.
 - `GET/POST /suppliers`, `GET/PATCH /suppliers/{id}`.
 - `GET /inventory/lots`, `POST /inventory/receipts`, `POST /inventory/adjustments`, `GET /inventory/movements`, `GET /inventory/expiring`.
 
@@ -27,7 +27,7 @@ Cashier can search products, read sellable availability, create sales, and read 
 
 ## Inventory, reports, and payment validation
 
-- Product search responses include qty_on_hand, qty_sellable, and a lots array for lots with positive on-hand quantity. Each lot entry contains its ID/code, expiry date, on-hand quantity, active flag, and computed is_sellable flag.
+- Product search responses are role-aware: Cashiers receive `qty_sellable` and a 30-day `expiry_warning`, without lot identifiers, lot codes, expiry dates, raw on-hand quantities, or lot active/sellability flags. Admins also receive `qty_on_hand` and a `lots` array for lots with positive on-hand quantity; each lot entry contains its ID/code, expiry date, on-hand quantity, active flag, and computed `is_sellable` flag.
 - Admin-only GET /inventory/movements returns movement, product, lot, reference, actor, reason, and timestamp fields. Optional filters are product_id, lot_id, movement_type, from, and to (ISO dates); limit and offset paginate results.
 - Admin-only GET /reports/sales accepts ISO date from/to (defaults to the last 30 days; maximum 366 days) and returns per-currency completed/voided counts and completed totals plus completed sales grouped by day and currency.
 - Admin-only GET /reports/stock returns per-product on-hand, sellable, expired, expiring-soon, lot-count, and cost-value totals. Optional expiring_days defaults to 30 and is bounded to 0?365.
