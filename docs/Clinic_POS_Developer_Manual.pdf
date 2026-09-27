@@ -1,0 +1,485 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R 12 0 R 14 0 R 16 0 R 18 0 R 20 0 R] /Count 8 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Length 4107 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (# Clinic POS   Developer Manual) Tj
+/F2 13 Tf 48 734 Td (System Architecture, Codebase Guide, Database Reference, and Maintenance Manual) Tj
+/F1 9 Tf 48 712 Td (Version 1.0   28 September 2026   Repository: D:\\pos\\clinic-pos) Tj
+/F1 9 Tf 48 698 Td (Audience: developers inheriting, operating, or changing this codebase.) Tj
+/F1 9 Tf 48 684 Td (This manual describes the source inspected on the date above. Current source and migrations) Tj
+/F1 9 Tf 48 670 Td (are authoritative. The existing architecture/API notes are older and partly stale. Tax and) Tj
+/F1 9 Tf 48 656 Td (invoice fields are application configuration; their presence does not establish legal,) Tj
+/F1 9 Tf 48 642 Td (accounting, or regulatory compliance.) Tj
+/F2 13 Tf 48 628 Td (Contents) Tj
+/F1 9 Tf 48 606 Td (1 Overview   2 Architecture/request flow   3 Repository map   4 Setup   5) Tj
+/F1 9 Tf 48 592 Td (Authentication/roles   6 Products/inventory   7 Checkout   8 Pricing/tax/discount   9) Tj
+/F1 9 Tf 48 578 Td (Tender/change   10 Idempotency   11 Invoices/privacy   12 Database/migrations   13 API   14) Tj
+/F1 9 Tf 48 564 Td (Frontend/POS   15 Reports/audit   16 Tests   17 Security   18 Troubleshooting   19) Tj
+/F1 9 Tf 48 550 Td (Maintenance   20 Limitations   21 Quick reference) Tj
+/F2 13 Tf 48 536 Td (1. Overview) Tj
+/F2 13 Tf 48 514 Td (Clinic POS is a local web point-of-sale application for a clinic selling physical products) Tj
+/F1 9 Tf 48 492 Td (and services. Cashiers authenticate, search an active catalog, build a cart, request a) Tj
+/F1 9 Tf 48 478 Td (server quote, tender payment, and complete a sale. Admins manage users, catalog/prices,) Tj
+/F1 9 Tf 48 464 Td (suppliers, stock lots, tax settings, reports and audit records. PostgreSQL is the durable) Tj
+/F1 9 Tf 48 450 Td (store.) Tj
+/F1 9 Tf 48 436 Td (Prices and tax/discount inputs are selected/calculated server-side. Completed sale lines and) Tj
+/F1 9 Tf 48 422 Td (tax/discount inputs are snapshotted; later catalog edits do not rewrite historical) Tj
+/F1 9 Tf 48 408 Td (transactions. Physical products consume inventory; services do not. Sale, stock, tender,) Tj
+/F1 9 Tf 48 394 Td (audit and idempotency writes share a PostgreSQL transaction. There is no external payment) Tj
+/F1 9 Tf 48 380 Td (processor integration: CAPTURED means recorded by this application, not confirmed by a) Tj
+/F1 9 Tf 48 366 Td (payment network. The software does not electronically verify SC/PWD eligibility or prove BIR) Tj
+/F1 9 Tf 48 352 Td (compliance.) Tj
+/F2 13 Tf 48 338 Td (2. Architecture and request flow) Tj
+/F1 9 Tf 48 316 Td (  flowchart TD) Tj
+/F1 9 Tf 48 302 Td (  Browser -->|same-origin HTTP| F[Frontend static server and API proxy]) Tj
+/F1 9 Tf 48 288 Td (  F --> A[Fastify backend/src/server.js]) Tj
+/F1 9 Tf 48 274 Td (  A --> AUTH[JWT plus active user and database roles]) Tj
+/F1 9 Tf 48 260 Td (  AUTH --> V[Zod validation]) Tj
+/F1 9 Tf 48 246 Td (  V --> L[Pricing, checkout, inventory, reports]) Tj
+/F1 9 Tf 48 232 Td (  L -->|parameterized SQL| DB[\(PostgreSQL\)]) Tj
+/F1 9 Tf 48 218 Td (  L --> AUD[Audit records]) Tj
+/F1 9 Tf 48 204 Td (  L --> R[JSON response plus request ID]) Tj
+/F1 9 Tf 48 190 Td (  R --> Browser) Tj
+/F1 9 Tf 48 176 Td (Frontend binds to 127.0.0.1:4173 and proxies /api to 127.0.0.1:3000 by default \(APIPORT\).) Tj
+/F1 9 Tf 48 162 Td (API uses HOST/PORT and defaults to loopback:3000. A protected handler verifies Bearer JWT,) Tj
+/F1 9 Tf 48 148 Td (reloads active user/current roles from PostgreSQL, validates route input with Zod, executes) Tj
+/F1 9 Tf 48 134 Td (parameterized SQL and returns JSON. Fastify maps validation failures to 400 INVALIDINPUT;) Tj
+/F1 9 Tf 48 120 Td (errors carry code, message and requestid, also returned in x-request-id. Unexpected errors) Tj
+/F1 9 Tf 48 106 Td (are logged and masked.) Tj
+/F1 9 Tf 48 92 Td (  sequenceDiagram) Tj
+/F1 9 Tf 48 78 Td (  Browser->>API: POST /sales + Idempotency-Key) Tj
+/F1 9 Tf 48 64 Td (  API->>DB: BEGIN; advisory lock by cashier/key) Tj
+/F1 9 Tf 48 50 Td (  DB-->>API: replay or proceed) Tj
+/F1 8 Tf 510 24 Td (1 / 8) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 3935 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (  API->>API: server price, tax, discount, tender) Tj
+/F1 9 Tf 48 734 Td (  API->>DB: stable product locks then FEFO lot locks) Tj
+/F1 9 Tf 48 720 Td (  API->>DB: sale snapshots, allocations, stock movements, payment) Tj
+/F1 9 Tf 48 706 Td (  API->>DB: audit and replay response; COMMIT) Tj
+/F1 9 Tf 48 692 Td (  API-->>Browser: sale response) Tj
+/F1 9 Tf 48 678 Td (The tx helper commits callback success, rolls back errors and always releases its client.) Tj
+/F1 9 Tf 48 664 Td (Checkout side effects belong inside this transaction.) Tj
+/F2 13 Tf 48 650 Td (3. Repository map) Tj
+/F1 9 Tf 48 628 Td (Path    Responsibility) Tj
+/F1 9 Tf 48 614 Td (---  ---) Tj
+/F1 9 Tf 48 600 Td (backend/src/server.js    Fastify routes, authentication, authorization, checkout, reports) Tj
+/F1 9 Tf 48 586 Td (and SQL; most business behavior is here.) Tj
+/F1 9 Tf 48 572 Td (backend/src/pricing.js    Cent conversion and sale arithmetic.) Tj
+/F1 9 Tf 48 558 Td (backend/src/sales-input.js    Strict checkout schema and tender rules.) Tj
+/F1 9 Tf 48 544 Td (backend/src/canonical-json.js    Recursive stable request serialization.) Tj
+/F1 9 Tf 48 530 Td (backend/src/product-response.js    Role-dependent product data.) Tj
+/F1 9 Tf 48 516 Td (backend/src/security-config.js    Access-token secret check.) Tj
+/F1 9 Tf 48 502 Td (backend/src/admin-credentials.js, bootstrap-admin.js    First Admin validation/hash/account) Tj
+/F1 9 Tf 48 488 Td (setup.) Tj
+/F1 9 Tf 48 474 Td (backend/src/migrate.js    Ordered SQL migration runner/checksum ledger.) Tj
+/F1 9 Tf 48 460 Td (backend/migrations    Five PostgreSQL schema migrations.) Tj
+/F1 9 Tf 48 446 Td (backend/tests    Node test runner unit/source tests and optional DB integration tests.) Tj
+/F1 9 Tf 48 432 Td (frontend/index.html, app.js    Browser entry, state, rendering and event handling.) Tj
+/F1 9 Tf 48 418 Td (frontend/checkout.js, api-client.js, pos-ux.js    Checkout, token refresh/API rules, scanner) Tj
+/F1 9 Tf 48 404 Td (and expiry UX.) Tj
+/F1 9 Tf 48 390 Td (frontend/server.js    Static server and backend proxy.) Tj
+/F1 9 Tf 48 376 Td (frontend/styles.css, icons.svg    Styles and local icon sprite.) Tj
+/F1 9 Tf 48 362 Td (docs/CLINICPOSDEVELOPERMANUAL.md    Source edition of this manual.) Tj
+/F1 9 Tf 48 348 Td (The existing docs/architecture.md is an earlier proposal. docs/api-contract.md is) Tj
+/F1 9 Tf 48 334 Td (partial/stale; it says change is not calculated, while current code accepts a single cash) Tj
+/F1 9 Tf 48 320 Td (over-tender. Current implementation wins.) Tj
+/F2 13 Tf 48 306 Td (4. Setup and startup) Tj
+/F1 9 Tf 48 284 Td (Requires Node.js 20+ and PostgreSQL. Copy backend/.env.example to an untracked backend/.env.) Tj
+/F1 9 Tf 48 270 Td (Set DATABASEURL and unique ACCESSTOKENSECRET, at least 32 bytes and not a placeholder.) Tj
+/F1 9 Tf 48 256 Td (DATABASESSL=true enables verified TLS. Optional HOST/PORT, FRONTENDPORT \(4173\), APIPORT) Tj
+/F1 9 Tf 48 242 Td (\(3000\). Never put credentials in source/docs/logs.) Tj
+/F1 9 Tf 48 228 Td (  cd D:\\pos\\clinic-pos\\backend) Tj
+/F1 9 Tf 48 214 Td (  npm install) Tj
+/F1 9 Tf 48 200 Td (  npm run migrate) Tj
+/F1 9 Tf 48 186 Td (  npm run bootstrap:admin) Tj
+/F1 9 Tf 48 172 Td (  npm start) Tj
+/F1 9 Tf 48 158 Td (Bootstrap refuses if an active Admin exists. Interactive mode prompts; unattended needs) Tj
+/F1 9 Tf 48 144 Td (ADMINUSERNAME, ADMINDISPLAYNAME, ADMINPASSWORD. Password is 12 200 characters and Argon2id) Tj
+/F1 9 Tf 48 130 Td (hashed; clear variables after use. Migrations seed roles/config, not Admin/catalog. In a) Tj
+/F1 9 Tf 48 116 Td (second terminal: cd D:\\pos\\clinic-pos\\frontend; npm install; npm start. Open) Tj
+/F1 9 Tf 48 102 Td (http://127.0.0.1:4173; backend health is /health. Admin must configure tax and classify) Tj
+/F1 9 Tf 48 88 Td (products before checkout.) Tj
+/F2 13 Tf 48 74 Td (5. Authentication and roles) Tj
+/F1 8 Tf 510 24 Td (2 / 8) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Length 4647 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (Login normalizes username, requires active user and verifies Argon2 hash. Failure audits) Tj
+/F1 9 Tf 48 734 Td (AUTHLOGINFAILED and returns 401. Success returns HS256 access token expiring after 15) Tj
+/F1 9 Tf 48 720 Td (minutes plus random 48-byte refresh token; only its SHA-256 hash is stored for 30 days.) Tj
+/F1 9 Tf 48 706 Td (Refresh locks valid session, revokes it and creates a new hash in a transaction. Logout) Tj
+/F1 9 Tf 48 692 Td (revokes matching session. /auth/me returns current user and roles.) Tj
+/F1 9 Tf 48 678 Td (ADMIN and CASHIER roles are seeded. Current role assignments are fetched from DB on each) Tj
+/F1 9 Tf 48 664 Td (protected call; JWT role claims do not authorize. Admin manages users, catalog, pricing,) Tj
+/F1 9 Tf 48 650 Td (suppliers, inventory, tax config, voids, reports, all sales and audit. Cashier searches,) Tj
+/F1 9 Tf 48 636 Td (quotes, sells, and reads own sale history/detail/invoice. Admin and sale owner can access) Tj
+/F1 9 Tf 48 622 Td (invoice; other cashiers get 403. UI hides admin pages for usability, but backend performs) Tj
+/F1 9 Tf 48 608 Td (enforcement. Deactivated accounts are rejected.) Tj
+/F2 13 Tf 48 594 Td (6. Products and inventory) Tj
+/F1 9 Tf 48 572 Td (Product includes unique SKU, optional unique barcode, descriptive fields, active flag,) Tj
+/F1 9 Tf 48 558 Td (PRODUCT/SERVICE type, tax classification, SC/PWD eligibility flags and promotion basis) Tj
+/F1 9 Tf 48 544 Td (points. productprice stores effective dated amount/currency. Search filters active products,) Tj
+/F1 9 Tf 48 530 Td (matches name/SKU substring or exact barcode, selects current price, sorts by name, max 100.) Tj
+/F1 9 Tf 48 516 Td (Admin receives on-hand and lot details; cashier receives sellable quantity/expiry boolean) Tj
+/F1 9 Tf 48 502 Td (only.) Tj
+/F1 9 Tf 48 488 Td (Lots store product/supplier, lot code, expiry, received time, unit cost and received/on-hand) Tj
+/F1 9 Tf 48 474 Td (quantities \(3 decimals\), active flag. Physical sale lots must be active, positive,) Tj
+/F1 9 Tf 48 460 Td (unexpired; expiry today is sellable; no expiry is eligible. Expired stock is on-hand but not) Tj
+/F1 9 Tf 48 446 Td (sellable. Search warning uses active lots expiring today through +30 days. Stock report's) Tj
+/F1 9 Tf 48 432 Td (expiring quantity includes inactive lots. SERVICE skips stock deduction and gets 100000) Tj
+/F1 9 Tf 48 418 Td (sellable sentinel in search/report; this is not inventory.) Tj
+/F1 9 Tf 48 404 Td (FEFO locks eligible lots and orders expiry ascending, no-expiry last, received time then) Tj
+/F1 9 Tf 48 390 Td (UUID. It consumes across lots, stores saleitemlot allocation, updates balance and appends) Tj
+/F1 9 Tf 48 376 Td (negative SALE movement. Insufficient stock returns 409 and rolls back. Product locks are) Tj
+/F1 9 Tf 48 362 Td (acquired in stable product-ID order before lot locks.) Tj
+/F1 9 Tf 48 348 Td (  flowchart LR) Tj
+/F1 9 Tf 48 334 Td (  Line --> Lock[Lock eligible lots]) Tj
+/F1 9 Tf 48 320 Td (  Lock --> Sort[Sort expiry, received time, UUID]) Tj
+/F1 9 Tf 48 306 Td (  Sort --> Take[Consume first lot]) Tj
+/F1 9 Tf 48 292 Td (  Take --> More{Still needed?}) Tj
+/F1 9 Tf 48 278 Td (  More -- yes --> Take) Tj
+/F1 9 Tf 48 264 Td (  More -- no --> Write[Allocation, decrement, SALE movement]) Tj
+/F1 9 Tf 48 250 Td (  Lock -->|insufficient| Rollback[409 and rollback]) Tj
+/F1 9 Tf 48 236 Td (Admin receipt creates lot and RECEIPT movement. Adjustment locks lot, rejects negative) Tj
+/F1 9 Tf 48 222 Td (balance, changes qty and records ADJUSTMENTIN/OUT plus reason. Void restores allocations and) Tj
+/F1 9 Tf 48 208 Td (records REVERSAL movements.) Tj
+/F2 13 Tf 48 194 Td (7. Checkout) Tj
+/F1 9 Tf 48 172 Td (Client sends product IDs/quantities, currency, optional customer name/one discount object) Tj
+/F1 9 Tf 48 158 Td (and 1 10 tenders; requires Idempotency-Key length 8 200. Strict schema rejects unknown) Tj
+/F1 9 Tf 48 144 Td (fields, including client payment status. Client price/tax values are not authoritative.) Tj
+/F1 9 Tf 48 130 Td (Sequence: parse before writes; canonicalize/hash input; begin transaction and take advisory) Tj
+/F1 9 Tf 48 116 Td (lock per cashier/key; return matching prior response or 409 changed-body conflict; read) Tj
+/F1 9 Tf 48 102 Td (active products/current prices/tax config; calculate; validate payment before writes; create) Tj
+/F1 9 Tf 48 88 Td (PENDING sale and snapshots/beneficiary; lock product IDs in stable order and lots FEFO;) Tj
+/F1 9 Tf 48 74 Td (insert line snapshots, allocations, movements and stock updates; create payments; mark) Tj
+/F1 8 Tf 510 24 Td (3 / 8) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 9 0 R >>
+endobj
+11 0 obj
+<< /Length 4708 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (COMPLETED; add audit and idempotency record; commit. All transactional writes roll back on) Tj
+/F1 9 Tf 48 734 Td (error. Services skip lots. Payment status is application-owned, not provider-verified. Keep) Tj
+/F1 9 Tf 48 720 Td (external effects out of this transaction unless using post-commit/outbox design.) Tj
+/F2 13 Tf 48 706 Td (8. Pricing, tax and discounts) Tj
+/F1 9 Tf 48 684 Td (pricing.js uses integer cents \(BigInt\), quantity thousandths, basis-point percentages, and) Tj
+/F1 9 Tf 48 670 Td (deterministic nearest-cent rounding. Avoid floating-point money. Tax singleton:) Tj
+/F1 9 Tf 48 656 Td (UNCONFIGURED/VATREGISTERED/NONVAT/VATEXEMPT, VAT rate, INCLUSIVE/EXCLUSIVE pricing, seller) Tj
+/F1 9 Tf 48 642 Td (details/effective date, optional permit/authority/serial fields. Admin writes; future) Tj
+/F1 9 Tf 48 628 Td (effective dates rejected; non-VAT/VAT-exempt seller requires zero VAT rate.) Tj
+/F1 9 Tf 48 614 Td (Product classification: UNCLASSIFIED, VATABLE, VATEXEMPT, ZERORATED, NONVAT. UNCLASSIFIED) Tj
+/F1 9 Tf 48 600 Td (cannot price. VATABLE and ZERORATED require VAT registration; NONVAT conflicts with) Tj
+/F1 9 Tf 48 586 Td (VATREGISTERED. VATEXEMPT product receives no VAT. Inclusive VATABLE gross contains tax; base) Tj
+/F1 9 Tf 48 572 Td (is gross10000/\(10000+rate\), tax is difference. Exclusive VATABLE adds configured tax after) Tj
+/F1 9 Tf 48 558 Td (discount. Promotion runs through same base/gross arithmetic and tax recomputation.) Tj
+/F1 9 Tf 48 544 Td (One SC or PWD may be selected; no stacking. For each eligible line selected statutory) Tj
+/F1 9 Tf 48 530 Td (calculation is 20% of base with zero tax, compared to promotional due; lower due wins per) Tj
+/F1 9 Tf 48 516 Td (line. Ineligible lines get no statutory discount. Sale records statutory type only if at) Tj
+/F1 9 Tf 48 502 Td (least one line used it. The system does not decide legal classification/eligibility,) Tj
+/F1 9 Tf 48 488 Td (validate ID electronically, verify registration, or prove compliance. These are) Tj
+/F1 9 Tf 48 474 Td (clinic/accounting inputs requiring outside review.) Tj
+/F2 13 Tf 48 460 Td (9. Payments and change) Tj
+/F1 9 Tf 48 438 Td (Methods CASH, CARD, EWALLET, OTHER; positive amounts to two decimals; 1 10 tenders. Split) Tj
+/F1 9 Tf 48 424 Td (tenders must total exactly due. One cash tender may equal/exceed due; server computes) Tj
+/F1 9 Tf 48 410 Td (integer-cent change. Short tender, noncash excess and mixed excess fail. payment.amount is) Tj
+/F1 9 Tf 48 396 Td (applied to sale; tenderedamount and changeamount capture cash received/returned. Exact split) Tj
+/F1 9 Tf 48 382 Td (tenders store zero change. UI preview is not authority. CAPTURED is application state; no) Tj
+/F1 9 Tf 48 368 Td (processor is called. Migration 005 adds nullable tender/change pair. Historical NULLs mean) Tj
+/F1 9 Tf 48 354 Td (unknown, not zero.) Tj
+/F2 13 Tf 48 340 Td (10. Idempotency) Tj
+/F1 9 Tf 48 318 Td (Key is scoped by authenticated cashier and POST /sales. canonical-json recursively sorts) Tj
+/F1 9 Tf 48 304 Td (object keys but preserves array order; SHA-256 fingerprint stored. Transaction-scoped) Tj
+/F1 9 Tf 48 290 Td (PostgreSQL advisory lock serializes same key; composite primary key is secondary protection.) Tj
+/F1 9 Tf 48 276 Td (Matching request replays original JSON; same key/different fingerprint returns 409) Tj
+/F1 9 Tf 48 262 Td (IDEMPOTENCYKEYREUSED. Reordered arrays fingerprint differently. Frontend does not) Tj
+/F1 9 Tf 48 248 Td (automatically replay non-idempotent sale requests.) Tj
+/F1 9 Tf 48 234 Td (  flowchart TD) Tj
+/F1 9 Tf 48 220 Td (  Request --> Validate --> Hash --> Lock) Tj
+/F1 9 Tf 48 206 Td (  Lock --> Existing{Saved key?}) Tj
+/F1 9 Tf 48 192 Td (  Existing -- no --> Save[Create sale and response]) Tj
+/F1 9 Tf 48 178 Td (  Existing -- same hash --> Replay[Return original response]) Tj
+/F1 9 Tf 48 164 Td (  Existing -- different hash --> Conflict[409]) Tj
+/F2 13 Tf 48 150 Td (11. Invoices and beneficiary data) Tj
+/F1 9 Tf 48 128 Td (Invoice/receipt number format I-YYYYMMDD-XXXXXXXX uses UUID fragment and unique DB columns;) Tj
+/F1 9 Tf 48 114 Td (no invoice sequence or external authorization exists. Sale and lines preserve) Tj
+/F1 9 Tf 48 100 Td (seller/tax/discount/product/price/quantity snapshots. Permit-to-use, authority-to-print and) Tj
+/F1 9 Tf 48 86 Td (approved serial values are optional inputs, not evidence of authorization.) Tj
+/F1 9 Tf 48 72 Td (Beneficiary type/name/ID are in separate salebeneficiary table. Normal GET sale omits) Tj
+/F1 9 Tf 48 58 Td (identity and gives at most type. GET sale invoice returns identity only to Admin/owning) Tj
+/F1 8 Tf 510 24 Td (4 / 8) Tj
+ET
+endstream
+endobj
+12 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 11 0 R >>
+endobj
+13 0 obj
+<< /Length 3923 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (cashier and logs SALEINVOICEBENEFICIARYVIEWED. This is not a full privacy/retention policy.) Tj
+/F2 13 Tf 48 734 Td (12. Database and migrations) Tj
+/F1 9 Tf 48 712 Td (Main relations: appuser-role-userrole and refreshsession; product-productprice;) Tj
+/F1 9 Tf 48 698 Td (supplier-inventorylot-stockmovement; sale-saleitem-saleitemlot-payment; salebeneficiary;) Tj
+/F1 9 Tf 48 684 Td (auditlog; idempotencyrecord; singleton taxconfiguration. Money is NUMERIC\(12,2\), quantities) Tj
+/F1 9 Tf 48 670 Td (NUMERIC\(14,3\), IDs UUID, event time timestamptz, expiry date. Tax config is embedded as JSON) Tj
+/F1 9 Tf 48 656 Td (snapshots, not FK. Completed financial sale fields and completed items are) Tj
+/F1 9 Tf 48 642 Td (trigger-protected; void preserves original financial facts.) Tj
+/F1 9 Tf 48 628 Td (  erDiagram) Tj
+/F1 9 Tf 48 614 Td (  APP_USER ||--o{ USER_ROLE : assigned) Tj
+/F1 9 Tf 48 600 Td (  ROLE ||--o{ USER_ROLE : grants) Tj
+/F1 9 Tf 48 586 Td (  PRODUCT ||--o{ PRODUCT_PRICE : priced) Tj
+/F1 9 Tf 48 572 Td (  PRODUCT ||--o{ INVENTORY_LOT : stocked) Tj
+/F1 9 Tf 48 558 Td (  SUPPLIER o|--o{ INVENTORY_LOT : supplies) Tj
+/F1 9 Tf 48 544 Td (  APP_USER ||--o{ SALE : cashier) Tj
+/F1 9 Tf 48 530 Td (  SALE ||--|{ SALE_ITEM : contains) Tj
+/F1 9 Tf 48 516 Td (  SALE_ITEM ||--o{ SALE_ITEM_LOT : allocates) Tj
+/F1 9 Tf 48 502 Td (  INVENTORY_LOT ||--o{ SALE_ITEM_LOT : consumed) Tj
+/F1 9 Tf 48 488 Td (  SALE ||--o{ PAYMENT : paid) Tj
+/F1 9 Tf 48 474 Td (  SALE ||--o| SALE_BENEFICIARY : identity) Tj
+/F1 9 Tf 48 460 Td (  PRODUCT ||--o{ STOCK_MOVEMENT : moves) Tj
+/F1 9 Tf 48 446 Td (  APP_USER o|--o{ AUDIT_LOG : acts) Tj
+/F1 9 Tf 48 432 Td (Migration    Purpose and historical effect) Tj
+/F1 9 Tf 48 418 Td (---  ---) Tj
+/F1 9 Tf 48 404 Td (001initialschema.sql    Core tables, constraints/indexes, pgcrypto; seeds only ADMIN/CASHIER) Tj
+/F1 9 Tf 48 390 Td (roles.) Tj
+/F1 9 Tf 48 376 Td (002taxdiscounts.sql    Tax singleton; product type/classification/flags; sale and line) Tj
+/F1 9 Tf 48 362 Td (snapshots. Existing lines deterministically numbered by UUID; products become UNCLASSIFIED;) Tj
+/F1 9 Tf 48 348 Td (no historical totals recomputed.) Tj
+/F1 9 Tf 48 334 Td (003saleintegrityprivacy.sql    PENDING status; separate beneficiary table copies old data) Tj
+/F1 9 Tf 48 320 Td (then clears duplicate identity; immutability triggers. Unknown snapshots remain unknown.) Tj
+/F1 9 Tf 48 306 Td (004invoiceauthorizationfields.sql    Optional permit/authority/serial values; none faked.) Tj
+/F1 9 Tf 48 292 Td (005cashtenderchange.sql    Nullable tendered/change pair; old tender values unknowable.) Tj
+/F1 9 Tf 48 278 Td (migrate.js sorts files, applies unseen migrations in per-file transaction and records) Tj
+/F1 9 Tf 48 264 Td (SHA-256 in schemamigrations. It skips recorded filename without comparing modified checksum.) Tj
+/F1 9 Tf 48 250 Td (Do not edit applied migration; add forward migration. Back up/rehearse.) Tj
+/F2 13 Tf 48 236 Td (13. API reference) Tj
+/F1 9 Tf 48 214 Td (Routes register in backend/src/server.js; protected calls use Bearer token. Common codes:) Tj
+/F1 9 Tf 48 200 Td (INVALIDINPUT 400, auth 401, FORBIDDEN 403, NOTFOUND 404, business conflicts 409,) Tj
+/F1 9 Tf 48 186 Td (INTERNALERROR 500.) Tj
+/F1 9 Tf 48 172 Td (Method/path    Access and function) Tj
+/F1 9 Tf 48 158 Td (---  ---) Tj
+/F1 9 Tf 48 144 Td (GET /health    Public health.) Tj
+/F1 9 Tf 48 130 Td (POST /api/v1/auth/login, /refresh    Public credentials/session rotation.) Tj
+/F1 9 Tf 48 116 Td (POST /api/v1/auth/logout; GET /auth/me    Active user.) Tj
+/F1 9 Tf 48 102 Td (GET/POST /api/v1/users; PATCH /users/:id; PUT /users/:id/roles    Admin user management.) Tj
+/F1 9 Tf 48 88 Td (GET/POST /api/v1/products; PATCH /products/:id    Authenticated read; Admin writes.) Tj
+/F1 9 Tf 48 74 Td (GET/POST /products/:id/prices    Admin history/add.) Tj
+/F1 8 Tf 510 24 Td (5 / 8) Tj
+ET
+endstream
+endobj
+14 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 13 0 R >>
+endobj
+15 0 obj
+<< /Length 4626 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (GET/POST /api/v1/suppliers; PATCH /suppliers/:id    Admin.) Tj
+/F1 9 Tf 48 734 Td (GET/PUT /api/v1/tax-configuration    User read/Admin write.) Tj
+/F1 9 Tf 48 720 Td (POST /api/v1/inventory/receipts, /adjustments    Admin.) Tj
+/F1 9 Tf 48 706 Td (GET /api/v1/inventory/lots, /expiring, /movements    Admin.) Tj
+/F1 9 Tf 48 692 Td (POST /api/v1/sales/quote    Admin/Cashier server quote.) Tj
+/F1 9 Tf 48 678 Td (POST /api/v1/sales    Admin/Cashier idempotent sale.) Tj
+/F1 9 Tf 48 664 Td (GET /api/v1/sales; GET /sales/:id; GET /sales/:id/invoice    Admin or owning cashier.) Tj
+/F1 9 Tf 48 650 Td (POST /api/v1/sales/:id/void    Admin compensating void.) Tj
+/F1 9 Tf 48 636 Td (GET /api/v1/reports/sales, /reports/stock, /api/v1/audit-logs    Admin.) Tj
+/F1 9 Tf 48 622 Td (Sales list limit 1 100 and optional receipt query; report dates ISO, default 30 dates, max) Tj
+/F2 13 Tf 48 608 Td (366. Sales report totals grouped by currency, completed revenue/tax/discount, completed/void) Tj
+/F1 9 Tf 48 586 Td (counts, daily completed totals and transaction/payment rows. It does not calculate average) Tj
+/F1 9 Tf 48 572 Td (transaction value. Stock report horizon 0 365 and returns) Tj
+/F1 9 Tf 48 558 Td (on-hand/sellable/expired/expiring/cost value/lot count. Audit max 200. Movement has) Tj
+/F1 9 Tf 48 544 Td (product/lot/type/date filters, limit/offset. Check route Zod schemas for exact body/response) Tj
+/F1 9 Tf 48 530 Td (fields before extending clients.) Tj
+/F2 13 Tf 48 516 Td (14. Frontend and POS) Tj
+/F1 9 Tf 48 494 Td (No framework/build system. index.html loads app.js, which owns state and renders) Tj
+/F1 9 Tf 48 480 Td (event-delegated views; dynamic values are escaped; modal focus is managed. api-client.js) Tj
+/F1 9 Tf 48 466 Td (sends tokens, shares refresh across concurrent 401, retries safe requests once, never) Tj
+/F1 9 Tf 48 452 Td (automatically replays sale. Browser stores tokens at clinic.access/clinic.refresh in) Tj
+/F1 9 Tf 48 438 Td (localStorage. checkout.js checks quantities/tenders, previews cash change, blocks concurrent) Tj
+/F1 9 Tf 48 424 Td (submit; backend repeats rules. pos-ux.js handles barcode Enter/expiry helper.) Tj
+/F1 9 Tf 48 410 Td (frontend/server.js serves no-store assets, blocks path escape, proxies /api and returns 502) Tj
+/F1 9 Tf 48 396 Td (APIUNAVAILABLE if upstream is down.) Tj
+/F1 9 Tf 48 382 Td (Cashier flow: login -> search name/SKU/barcode -> cart -> quote -> optional one SC/PWD ->) Tj
+/F1 9 Tf 48 368 Td (tenders -> checkout -> invoice/change -> history. Admin adds) Tj
+/F1 9 Tf 48 354 Td (catalog/stock/user/tax/report/audit. UI role filtering is not security. No browser E2E) Tj
+/F1 9 Tf 48 340 Td (framework appears in scripts.) Tj
+/F2 13 Tf 48 326 Td (15. Reports and audit) Tj
+/F1 9 Tf 48 304 Td (Sales report groups currency; completed/voided counts separate; financial sums include) Tj
+/F1 9 Tf 48 290 Td (completed only; by-day completed sales; transactions can have one row per payment. Range) Tj
+/F1 9 Tf 48 276 Td (uses UTC date defaults. Average ticket metric is unavailable from API. Stock report returns) Tj
+/F1 9 Tf 48 262 Td (quantities, cost value and positive lot count. Its expiring quantity includes inactive lots,) Tj
+/F1 9 Tf 48 248 Td (unlike search warning. Read SQL before changing labels.) Tj
+/F1 9 Tf 48 234 Td (Audit stores optional actor/action/entity/JSON details/request ID/time. Events include) Tj
+/F1 9 Tf 48 220 Td (login/logout, user/product/price/stock/tax changes, sale completion/void, bootstrap and) Tj
+/F1 9 Tf 48 206 Td (beneficiary invoice read. Admin-only, newest-first bounded list. No export, cursor) Tj
+/F1 9 Tf 48 192 Td (pagination, retention policy or tamper evidence. Verify atomicity route by route: some) Tj
+/F1 9 Tf 48 178 Td (audits use pool separate from mutation.) Tj
+/F2 13 Tf 48 164 Td (16. Tests and verification) Tj
+/F1 9 Tf 48 142 Td (Node built-in tests: backend npm test; backend npm run test:integration; frontend npm test.) Tj
+/F1 9 Tf 48 128 Td (Backend tests cover canonical JSON, pricing, security/bootstrap, input/payment, response) Tj
+/F1 9 Tf 48 114 Td (roles/privacy and route/migration contracts. Integration suite covers authorization,) Tj
+/F1 9 Tf 48 100 Td (tax/discount snapshots, FEFO/expired stock, service, stable lock ordering, rollback,) Tj
+/F1 9 Tf 48 86 Td (replay/key conflict and atomicity. Frontend tests cover refresh/retry, checkout helpers,) Tj
+/F1 9 Tf 48 72 Td (bootstrap/encoding/icons and UX.) Tj
+/F1 9 Tf 48 58 Td (PostgreSQL tests skip unless TESTDATABASEURL is set and require disposable DB named) Tj
+/F1 8 Tf 510 24 Td (6 / 8) Tj
+ET
+endstream
+endobj
+16 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 15 0 R >>
+endobj
+17 0 obj
+<< /Length 4278 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (clinicpostest or clinicpostest<suffix>. They refuse other names. A skipped test is not) Tj
+/F1 9 Tf 48 734 Td (runtime verification. No browser E2E script exists. This manual did not run tests or) Tj
+/F1 9 Tf 48 720 Td (migrations.) Tj
+/F2 13 Tf 48 706 Td (17. Security model and limits) Tj
+/F1 9 Tf 48 684 Td (Implemented: Argon2id, secret length/placeholder validation, short access tokens, hashed) Tj
+/F1 9 Tf 48 670 Td (rotating refresh session, active-user/live-role checks, Zod strict validation, parameterized) Tj
+/F1 9 Tf 48 656 Td (SQL, server-owned prices/tax/payment outcomes, transactions/locks, idempotency, audit,) Tj
+/F1 9 Tf 48 642 Td (beneficiary separation/ownership checks, UI escaping, loopback defaults/path containment.) Tj
+/F1 9 Tf 48 628 Td (This does not prove fully secure or deployment ready. LocalStorage token exposure under) Tj
+/F1 9 Tf 48 614 Td (script injection is a concern. No external processor validation, full threat model,) Tj
+/F1 9 Tf 48 600 Td (independent security review, production TLS/network/backup/retention setup or compliance) Tj
+/F1 9 Tf 48 586 Td (finding is established. Review CSP/XSS and operations before exposure.) Tj
+/F2 13 Tf 48 572 Td (18. Troubleshooting) Tj
+/F1 9 Tf 48 550 Td (Issue    Check) Tj
+/F1 9 Tf 48 536 Td (---  ---) Tj
+/F1 9 Tf 48 522 Td (API exits    Node 20+, DATABASEURL, long non-placeholder secret, PostgreSQL, TLS.) Tj
+/F1 9 Tf 48 508 Td (Migration failure    DB permissions/pgcrypto, connection, schemamigrations/history.) Tj
+/F1 9 Tf 48 494 Td (Login failure    Normalized username, active account, password, role assignment.) Tj
+/F1 9 Tf 48 480 Td (Tax/config checkout error    Admin settings, product classification, active/current) Tj
+/F1 9 Tf 48 466 Td (price/currency.) Tj
+/F1 9 Tf 48 452 Td (Insufficient stock    Active flag, expiry and quantity; expired lots are not sellable.) Tj
+/F1 9 Tf 48 438 Td (Idempotency 409    Original key used with different request; same sale retries original) Tj
+/F1 9 Tf 48 424 Td (body/key.) Tj
+/F1 9 Tf 48 410 Td (Change mismatch    Server calculation authoritative; only one cash tender may exceed due.) Tj
+/F1 9 Tf 48 396 Td (Frontend API unavailable    Backend health, APIPORT, loopback proxy.) Tj
+/F1 9 Tf 48 382 Td (Integration skipped    TESTDATABASEURL to disposable named DB only.) Tj
+/F1 9 Tf 48 368 Td (Odd reports    Date/status/currency; legacy tender NULL; inactive lots count in stock) Tj
+/F1 9 Tf 48 354 Td (expiring.) Tj
+/F1 9 Tf 48 340 Td (Port conflict    PORT/FRONTENDPORT; default loopback.) Tj
+/F2 13 Tf 48 326 Td (19. Safe maintenance) Tj
+/F1 9 Tf 48 304 Td (Pricing: keep arithmetic centralized; cover inclusive/exclusive, rounding, classifications) Tj
+/F1 9 Tf 48 290 Td (and mixed eligibility. Checkout: preserve parse-before-write, tender-before-write, advisory) Tj
+/F1 9 Tf 48 276 Td (lock, sorted product lock, FEFO lots and transaction. External effects need) Tj
+/F1 9 Tf 48 262 Td (postcommit/outbox. Inventory balance changes need same-transaction movement; void) Tj
+/F1 9 Tf 48 248 Td (compensates rather than deletes. Preserve payment applied/tendered/change distinctions and) Tj
+/F1 9 Tf 48 234 Td (historical NULL. Frontend: retain escaping, backend auth, no sale replay.) Tj
+/F1 9 Tf 48 220 Td (Add new migration; never edit applied migration. Assess defaults/historical rows, rehearse) Tj
+/F1 9 Tf 48 206 Td (on disposable DB and back up. Keep manual updated. High-risk files: server.js, pricing.js,) Tj
+/F1 9 Tf 48 192 Td (sales-input.js, financial migrations, checkout.js, api-client.js.) Tj
+/F2 13 Tf 48 178 Td (20. Known limitations) Tj
+/F1 9 Tf 48 156 Td (- Tax, legal classification, SC/PWD eligibility and invoice authorization need) Tj
+/F1 9 Tf 48 142 Td (clinic/professional review.) Tj
+/F1 9 Tf 48 128 Td (- No electronic beneficiary eligibility check or payment gateway.) Tj
+/F1 9 Tf 48 114 Td (- PostgreSQL tests need TESTDATABASEURL; otherwise skipped; browser E2E unavailable in) Tj
+/F1 9 Tf 48 100 Td (scripts.) Tj
+/F1 9 Tf 48 86 Td (- Historical tax/tender details can remain unknown.) Tj
+/F1 9 Tf 48 72 Td (- localStorage tokens pose XSS exposure.) Tj
+/F1 9 Tf 48 58 Td (- Stock expiring metric includes inactive lots; search warning does not.) Tj
+/F1 8 Tf 510 24 Td (7 / 8) Tj
+ET
+endstream
+endobj
+18 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 17 0 R >>
+endobj
+19 0 obj
+<< /Length 1640 >>
+stream
+BT
+/F1 9 Tf 48 748 Td (- Audit lacks cursor/filter/export/retention/tamper evidence; mutation atomicity varies.) Tj
+/F1 9 Tf 48 734 Td (- Static source inspection does not verify runtime/deployed configuration.) Tj
+/F1 9 Tf 48 720 Td (- Most backend behavior lives in large server.js.) Tj
+/F2 13 Tf 48 706 Td (21. Quick reference) Tj
+/F1 9 Tf 48 684 Td (Rule    Behavior) Tj
+/F1 9 Tf 48 670 Td (---  ---) Tj
+/F1 9 Tf 48 656 Td (Roles    Admin configures; cashier sells/reads own sales.) Tj
+/F1 9 Tf 48 642 Td (Price    Current effective DB price; client price ignored.) Tj
+/F1 9 Tf 48 628 Td (Arithmetic    Cents, max 2 decimals; quantity 3 decimals.) Tj
+/F1 9 Tf 48 614 Td (Discount    One SC or PWD; candidate 20% on eligible lines, compared with promotion per) Tj
+/F1 9 Tf 48 600 Td (line.) Tj
+/F1 9 Tf 48 586 Td (Stock    Active positive unexpired; FEFO; services skip lots.) Tj
+/F1 9 Tf 48 572 Td (Tender    Split exact; one cash tender can overpay and change is recorded.) Tj
+/F1 9 Tf 48 558 Td (Retry    Same cashier/key/body replays; different body -> 409.) Tj
+/F1 9 Tf 48 544 Td (Identity    Invoice-only normal read is minimized; owner/Admin invoice access audited.) Tj
+/F1 9 Tf 48 530 Td (Commands    backend: npm test, npm run test:integration, npm run migrate, npm run) Tj
+/F1 9 Tf 48 516 Td (bootstrap:admin; frontend: npm test.) Tj
+/F2 13 Tf 48 502 Td (Traceability: backend routes/helpers, migrations, frontend modules, tests and package) Tj
+/F1 9 Tf 48 480 Td (scripts in D:\\pos\\clinic-pos. This is not legal advice, deployment review, or runtime) Tj
+/F1 9 Tf 48 466 Td (verification.) Tj
+/F1 8 Tf 510 24 Td (8 / 8) Tj
+ET
+endstream
+endobj
+20 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 19 0 R >>
+endobj
+xref
+0 21
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000163 00000 n 
+0000000233 00000 n 
+0000000308 00000 n 
+0000004467 00000 n 
+0000004603 00000 n 
+0000008590 00000 n 
+0000008726 00000 n 
+0000013425 00000 n 
+0000013562 00000 n 
+0000018323 00000 n 
+0000018461 00000 n 
+0000022437 00000 n 
+0000022575 00000 n 
+0000027254 00000 n 
+0000027392 00000 n 
+0000031723 00000 n 
+0000031861 00000 n 
+0000033554 00000 n 
+trailer
+<< /Size 21 /Root 1 0 R >>
+startxref
+33692
+%%EOF
