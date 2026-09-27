@@ -1,123 +1,1188 @@
 import { createApiClient } from './api-client.js';
-import { assertCartQuantity, assertTenderTotal, beginCheckout, endCheckout, isSellableProduct, cashChangePreview } from './checkout.js';
+import {
+  assertCartQuantity,
+  assertTenderTotal,
+  beginCheckout,
+  endCheckout,
+  isSellableProduct,
+  cashChangePreview,
+} from './checkout.js';
 import { barcodeFromKeyboardEvent, isWithinExpiryWarning } from './pos-ux.js';
 
-const $ = (selector, root=document) => root.querySelector(selector);
-const money = (amount, currency='PHP') => new Intl.NumberFormat('en-PH',{style:'currency',currency:currency||'PHP'}).format(Number(amount||0));
-const dateFmt = value => value ? new Date(value).toLocaleDateString('en-PH',{year:'numeric',month:'short',day:'numeric'}) : 'No expiry';
-const esc = value => String(value ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = { access:localStorage.getItem('clinic.access')||'', refresh:localStorage.getItem('clinic.refresh')||'', me:null, page:'pos', products:[], cart:[], filter:'', busy:false, searchSequence:0, modal:null, history:[], lots:[], suppliers:[], users:[], toastTimer:null };
+const $ = (selector, root = document) => root.querySelector(selector);
+const money = (amount, currency = 'PHP') =>
+  new Intl.NumberFormat('en-PH', {
+    style: 'currency',
+    currency: currency || 'PHP',
+  }).format(Number(amount || 0));
+const dateFmt = (value) =>
+  value
+    ? new Date(value).toLocaleDateString('en-PH', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      })
+    : 'No expiry';
+const esc = (value) =>
+  String(value ?? '').replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[
+        c
+      ],
+  );
+const state = {
+  access: localStorage.getItem('clinic.access') || '',
+  refresh: localStorage.getItem('clinic.refresh') || '',
+  me: null,
+  page: 'pos',
+  products: [],
+  cart: [],
+  filter: '',
+  busy: false,
+  searchSequence: 0,
+  modal: null,
+  history: [],
+  lots: [],
+  suppliers: [],
+  users: [],
+  toastTimer: null,
+};
 const navItems = [
-  {id:'pos', label:'Point of sale', icon:'pos'}, {id:'history',label:'Sales history',icon:'history'},
-  {id:'dashboard',label:'Overview',icon:'overview',admin:true}, {id:'catalog',label:'Products & prices',icon:'products',admin:true},
-  {id:'inventory',label:'Inventory',icon:'inventory',admin:true}, {id:'suppliers',label:'Suppliers',icon:'suppliers',admin:true},
-  {id:'users',label:'User access',icon:'users',admin:true}, {id:'reports',label:'Reports & audit',icon:'reports',admin:true}, {id:'tax',label:'Tax settings',icon:'reports',admin:true}
+  { id: 'pos', label: 'Point of sale', icon: 'pos' },
+  { id: 'history', label: 'Sales history', icon: 'history' },
+  { id: 'dashboard', label: 'Overview', icon: 'overview', admin: true },
+  { id: 'catalog', label: 'Products & prices', icon: 'products', admin: true },
+  { id: 'inventory', label: 'Inventory', icon: 'inventory', admin: true },
+  { id: 'suppliers', label: 'Suppliers', icon: 'suppliers', admin: true },
+  { id: 'users', label: 'User access', icon: 'users', admin: true },
+  { id: 'reports', label: 'Reports & audit', icon: 'reports', admin: true },
+  { id: 'tax', label: 'Tax settings', icon: 'reports', admin: true },
 ];
-function icon(name){return `<svg class="icon" aria-hidden="true" focusable="false"><use href="/icons.svg#${name}"></use></svg>`;}
-function notify(message, error=false){ const box=$('#toast'); box.textContent=message;box.className=`toast show${error?' error':''}`;clearTimeout(state.toastTimer);state.toastTimer=setTimeout(()=>box.className='toast',3400); }
-function setTokens(token){state.access=token.access_token;state.refresh=token.refresh_token;localStorage.setItem('clinic.access',state.access);localStorage.setItem('clinic.refresh',state.refresh);}
-function focusDialog(){const dialog=$('[role="dialog"]');if(!dialog)return;const target=dialog.querySelector('[autofocus],input:not([disabled]),select:not([disabled]),button:not([disabled]),[tabindex="0"]');(target||dialog).focus();}
-function restoreModalFocus(){if(!state.modalReturnFocus)return;const old=state.modalReturnFocus;state.modalReturnFocus=null;if(old.isConnected){old.focus();return;}const attr=['action','add','sale','editProduct','editSupplier','editUser','adjustLot'].find(name=>old.dataset[name]);if(attr)document.querySelector(`[data-${attr.replace(/[A-Z]/g,c=>`-${c.toLowerCase()}`)}="${CSS.escape(old.dataset[attr])}"]`)?.focus();}
-function closeModal(){if(state.checkoutBusy)return;state.modal=null;state.editing=null;appShell();}
-function handleKeydown(event){const field=event.target;if(field.dataset.search&&event.key==='Enter'){event.preventDefault();clearTimeout(state.searchTimer);const query=field.value.trim();state.filter=query;const sequence=++state.searchSequence;if(field.dataset.search==='products'){api(`/products?q=${encodeURIComponent(query)}`).then(data=>{if(sequence!==state.searchSequence)return;state.products=data.items||[];const match=barcodeFromKeyboardEvent(event,state.products,query);if(match){if(isSellableProduct(match))addProduct(match.id);else{notify('This product is out of sellable stock.',true);renderPos($('#content'));}return;}renderPos($('#content')).then(()=>{if(sequence!==state.searchSequence)return;const input=$('[data-search="products"]');input?.focus();input?.setSelectionRange(query.length,query.length);});}).catch(err=>notify(err.message,true));}else renderPage().then(()=>{$('[data-search="sales"]')?.focus();});return;}
-  const dialog=$('[role="dialog"]');if(!dialog)return;if(event.key==='Escape'){if(!state.checkoutBusy){event.preventDefault();closeModal();}return;}if(event.key!=='Tab')return;const items=[...dialog.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el=>el.getClientRects().length);if(!items.length){event.preventDefault();dialog.focus();return;}const first=items[0],last=items[items.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}
-const api=createApiClient({getAccessToken:()=>state.access,getRefreshToken:()=>state.refresh,setTokens,onRefreshFailure:()=>{logout(false);}});
-function logout(callApi=true){if(callApi&&state.refresh)api('/auth/logout',{method:'POST',body:{refresh_token:state.refresh}}).catch(()=>{});state.access='';state.refresh='';state.me=null;state.cart=[];localStorage.removeItem('clinic.access');localStorage.removeItem('clinic.refresh');renderLogin();}
-function isAdmin(){return state.me?.roles?.includes('ADMIN');}
-function loginView(){ $('#app').innerHTML=`<div class="login-wrap"><section class="login-art"><div class="brand"><span class="brand-mark">+</span> CLINIC <span style="font-weight:500;opacity:.7">POS</span></div><div class="login-copy"><div class="eyebrow">Clinic retail, made simple</div><h1>Good care starts with the little things.</h1><p>Manage clinic essentials, keep stock safe, and make every checkout feel effortless.</p></div><div class="login-note">A calm, secure point of sale for your clinic team.</div></section><section class="login-panel"><form id="login-form" class="login-card"><div class="eyebrow" style="color:var(--green)">Welcome back</div><h2>Sign in to your clinic</h2><div class="subtle">Use your clinic account to continue.</div><div class="field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required autofocus placeholder="Enter your username"></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></div><div id="login-error" class="login-error"></div><button class="btn full" type="submit">Sign in ${icon('arrow')}</button><p class="subtle" style="font-size:10px;margin-top:22px">Your access is managed by your clinic administrator.</p></form></section></div>`;
-  $('#login-form').addEventListener('submit',async e=>{e.preventDefault();const form=new FormData(e.currentTarget);$('#login-error').textContent='';const button=e.currentTarget.querySelector('button');button.disabled=true;button.textContent='Signing in…';try{const token=await api('/auth/login',{method:'POST',body:{username:form.get('username'),password:form.get('password')}});setTokens(token);await loadMe();}catch(err){$('#login-error').textContent=err.message;button.disabled=false;button.textContent='Sign in';}});
+function icon(name) {
+  return `<svg class="icon" aria-hidden="true" focusable="false"><use href="/icons.svg#${name}"></use></svg>`;
 }
-function renderLogin(){loginView();}
-function appShell(){const hadDialog=$('[role="dialog"]');if(state.modal&&!hadDialog)state.modalReturnFocus=document.activeElement;const allowed=navItems.filter(item=>!item.admin||isAdmin());if(!allowed.some(i=>i.id===state.page))state.page='pos';const title=navItems.find(i=>i.id===state.page)?.label||'Point of sale';$('#app').innerHTML=`<div class="app-shell"><aside id="sidebar" class="sidebar"><div class="brand"><span class="brand-mark">+</span> CLINIC POS</div><div><div class="nav-label">Workspace</div><nav class="nav-list">${allowed.map(item=>`<button class="nav-btn ${state.page===item.id?'active':''}" data-nav="${item.id}"><span class="nav-icon">${icon(item.icon)}</span>${item.label}</button>`).join('')}</nav></div><div class="sidebar-foot"><div class="avatar">${esc((state.me.display_name||state.me.username).split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase())}</div><div class="user-meta"><strong>${esc(state.me.display_name||state.me.username)}</strong><span>${isAdmin()?'Administrator':'Cashier'}</span></div><button class="btn ghost small" data-action="logout" aria-label="Sign out">${icon('logout')}</button></div></aside><section class="main-area"><header class="topbar"><div style="display:flex;align-items:center;gap:11px"><button class="mobile-menu" data-action="menu" aria-label="Open navigation">${icon('menu')}</button><div class="crumb">Clinic <strong>${esc(title)}</strong></div></div><div class="top-actions"><span class="date-chip">${new Date().toLocaleDateString('en-PH',{weekday:'short',month:'short',day:'numeric'})}</span><span class="tag">${isAdmin()?'ADMIN':'CASHIER'}</span></div></header><div id="content" class="content"></div></section></div>${state.modal?state.modal:''}`;$('#app').onclick=handleClick;$('#app').onsubmit=handleSubmit;$('#app').oninput=handleInput;$('#app').onchange=handleChange;$('#app').onkeydown=handleKeydown;renderPage();if(state.modal)focusDialog();else restoreModalFocus();}
-async function loadMe(){try{state.me=await api('/auth/me');appShell();}catch(err){if(err.status===401)logout(false);else renderLogin();}}
-function pageHead(title,description,actions=''){return `<div class="page-heading"><div><h1>${title}</h1><p>${description}</p></div><div class="heading-actions">${actions}</div></div>`;}
-function stat(label,value,foot,iconName){return `<div class="stat"><span class="stat-icon">${icon(iconName)}</span><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-foot">${foot}</div></div>`;}
-function panel(title,body,action=''){return `<section class="panel"><div class="panel-head"><h2>${title}</h2>${action}</div><div class="panel-body">${body}</div></section>`;}
-function empty(text){return `<div class="empty">${text}</div>`;}
-function fmtQty(value){return new Intl.NumberFormat('en-PH',{maximumFractionDigits:3}).format(Number(value||0));}
-async function renderPage(){const target=$('#content');if(!target)return;target.innerHTML='<div class="skeleton">Loading your workspace…</div>';try{if(state.page==='pos')return await renderPos(target);if(state.page==='history')return await renderHistory(target);if(state.page==='dashboard')return await renderDashboard(target);if(state.page==='catalog')return await renderCatalog(target);if(state.page==='inventory')return await renderInventory(target);if(state.page==='suppliers')return await renderSuppliers(target);if(state.page==='users')return await renderUsers(target);if(state.page==='reports')return await renderReports(target);if(state.page==='tax')return await renderTaxSettings(target);}catch(err){target.innerHTML=`${pageHead(navItems.find(x=>x.id===state.page)?.label||'Workspace','')}<section class="panel"><div class="panel-body">${empty(esc(err.message))}<button class="btn secondary" data-action="reload">Try again</button></div></section>`;}}
-function lotWarning(product){
-  const lots=Array.isArray(product.lots)?product.lots:[];
-  const soon=lots.filter(l=>l.is_sellable&&l.expires_on&&Number(l.qty_on_hand)>0).sort((a,b)=>a.expires_on.localeCompare(b.expires_on)).find(l=>isWithinExpiryWarning(l.expires_on,new Date(),30));
-  if(soon)return `Expires ${dateFmt(soon.expires_on)}`;
-  if(lots.some(l=>!l.is_sellable&&Number(l.qty_on_hand)>0))return 'Expired or inactive lots excluded';
+function notify(message, error = false) {
+  const box = $('#toast');
+  box.textContent = message;
+  box.className = `toast show${error ? ' error' : ''}`;
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => (box.className = 'toast'), 3400);
+}
+function setTokens(token) {
+  state.access = token.access_token;
+  state.refresh = token.refresh_token;
+  localStorage.setItem('clinic.access', state.access);
+  localStorage.setItem('clinic.refresh', state.refresh);
+}
+function focusDialog() {
+  const dialog = $('[role="dialog"]');
+  if (!dialog) return;
+  const target = dialog.querySelector(
+    '[autofocus],input:not([disabled]),select:not([disabled]),button:not([disabled]),[tabindex="0"]',
+  );
+  (target || dialog).focus();
+}
+function restoreModalFocus() {
+  if (!state.modalReturnFocus) return;
+  const old = state.modalReturnFocus;
+  state.modalReturnFocus = null;
+  if (old.isConnected) {
+    old.focus();
+    return;
+  }
+  const attr = [
+    'action',
+    'add',
+    'sale',
+    'editProduct',
+    'editSupplier',
+    'editUser',
+    'adjustLot',
+  ].find((name) => old.dataset[name]);
+  if (attr)
+    document
+      .querySelector(
+        `[data-${attr.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${CSS.escape(old.dataset[attr])}"]`,
+      )
+      ?.focus();
+}
+function closeModal() {
+  if (state.checkoutBusy) return;
+  state.modal = null;
+  state.editing = null;
+  appShell();
+}
+function handleKeydown(event) {
+  const field = event.target;
+  if (field.dataset.search && event.key === 'Enter') {
+    event.preventDefault();
+    clearTimeout(state.searchTimer);
+    const query = field.value.trim();
+    state.filter = query;
+    const sequence = ++state.searchSequence;
+    if (field.dataset.search === 'products') {
+      api(`/products?q=${encodeURIComponent(query)}`)
+        .then((data) => {
+          if (sequence !== state.searchSequence) return;
+          state.products = data.items || [];
+          const match = barcodeFromKeyboardEvent(event, state.products, query);
+          if (match) {
+            if (isSellableProduct(match)) addProduct(match.id);
+            else {
+              notify('This product is out of sellable stock.', true);
+              renderPos($('#content'));
+            }
+            return;
+          }
+          renderPos($('#content')).then(() => {
+            if (sequence !== state.searchSequence) return;
+            const input = $('[data-search="products"]');
+            input?.focus();
+            input?.setSelectionRange(query.length, query.length);
+          });
+        })
+        .catch((err) => notify(err.message, true));
+    } else
+      renderPage().then(() => {
+        $('[data-search="sales"]')?.focus();
+      });
+    return;
+  }
+  const dialog = $('[role="dialog"]');
+  if (!dialog) return;
+  if (event.key === 'Escape') {
+    if (!state.checkoutBusy) {
+      event.preventDefault();
+      closeModal();
+    }
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const items = [
+    ...dialog.querySelectorAll(
+      'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+    ),
+  ].filter((el) => el.getClientRects().length);
+  if (!items.length) {
+    event.preventDefault();
+    dialog.focus();
+    return;
+  }
+  const first = items[0],
+    last = items[items.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+const api = createApiClient({
+  getAccessToken: () => state.access,
+  getRefreshToken: () => state.refresh,
+  setTokens,
+  onRefreshFailure: () => {
+    logout(false);
+  },
+});
+function logout(callApi = true) {
+  if (callApi && state.refresh)
+    api('/auth/logout', {
+      method: 'POST',
+      body: { refresh_token: state.refresh },
+    }).catch(() => {});
+  state.access = '';
+  state.refresh = '';
+  state.me = null;
+  state.cart = [];
+  localStorage.removeItem('clinic.access');
+  localStorage.removeItem('clinic.refresh');
+  renderLogin();
+}
+function isAdmin() {
+  return state.me?.roles?.includes('ADMIN');
+}
+function loginView() {
+  $('#app').innerHTML =
+    `<div class="login-wrap"><section class="login-art"><div class="brand"><span class="brand-mark">+</span> CLINIC <span style="font-weight:500;opacity:.7">POS</span></div><div class="login-copy"><div class="eyebrow">Clinic retail, made simple</div><h1>Good care starts with the little things.</h1><p>Manage clinic essentials, keep stock safe, and make every checkout feel effortless.</p></div><div class="login-note">A calm, secure point of sale for your clinic team.</div></section><section class="login-panel"><form id="login-form" class="login-card"><div class="eyebrow" style="color:var(--green)">Welcome back</div><h2>Sign in to your clinic</h2><div class="subtle">Use your clinic account to continue.</div><div class="field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required autofocus placeholder="Enter your username"></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your password"></div><div id="login-error" class="login-error"></div><button class="btn full" type="submit">Sign in ${icon('arrow')}</button><p class="subtle" style="font-size:10px;margin-top:22px">Your access is managed by your clinic administrator.</p></form></section></div>`;
+  $('#login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = new FormData(e.currentTarget);
+    $('#login-error').textContent = '';
+    const button = e.currentTarget.querySelector('button');
+    button.disabled = true;
+    button.textContent = 'Signing in…';
+    try {
+      const token = await api('/auth/login', {
+        method: 'POST',
+        body: {
+          username: form.get('username'),
+          password: form.get('password'),
+        },
+      });
+      setTokens(token);
+      await loadMe();
+    } catch (err) {
+      $('#login-error').textContent = err.message;
+      button.disabled = false;
+      button.textContent = 'Sign in';
+    }
+  });
+}
+function renderLogin() {
+  loginView();
+}
+function appShell() {
+  const hadDialog = $('[role="dialog"]');
+  if (state.modal && !hadDialog)
+    state.modalReturnFocus = document.activeElement;
+  const allowed = navItems.filter((item) => !item.admin || isAdmin());
+  if (!allowed.some((i) => i.id === state.page)) state.page = 'pos';
+  const title =
+    navItems.find((i) => i.id === state.page)?.label || 'Point of sale';
+  $('#app').innerHTML =
+    `<div class="app-shell"><aside id="sidebar" class="sidebar"><div class="brand"><span class="brand-mark">+</span> CLINIC POS</div><div><div class="nav-label">Workspace</div><nav class="nav-list">${allowed.map((item) => `<button class="nav-btn ${state.page === item.id ? 'active' : ''}" data-nav="${item.id}"><span class="nav-icon">${icon(item.icon)}</span>${item.label}</button>`).join('')}</nav></div><div class="sidebar-foot"><div class="avatar">${esc(
+      (state.me.display_name || state.me.username)
+        .split(/\s+/)
+        .map((x) => x[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase(),
+    )}</div><div class="user-meta"><strong>${esc(state.me.display_name || state.me.username)}</strong><span>${isAdmin() ? 'Administrator' : 'Cashier'}</span></div><button class="btn ghost small" data-action="logout" aria-label="Sign out">${icon('logout')}</button></div></aside><section class="main-area"><header class="topbar"><div style="display:flex;align-items:center;gap:11px"><button class="mobile-menu" data-action="menu" aria-label="Open navigation">${icon('menu')}</button><div class="crumb">Clinic <strong>${esc(title)}</strong></div></div><div class="top-actions"><span class="date-chip">${new Date().toLocaleDateString('en-PH', { weekday: 'short', month: 'short', day: 'numeric' })}</span><span class="tag">${isAdmin() ? 'ADMIN' : 'CASHIER'}</span></div></header><div id="content" class="content"></div></section></div>${state.modal ? state.modal : ''}`;
+  $('#app').onclick = handleClick;
+  $('#app').onsubmit = handleSubmit;
+  $('#app').oninput = handleInput;
+  $('#app').onchange = handleChange;
+  $('#app').onkeydown = handleKeydown;
+  renderPage();
+  if (state.modal) focusDialog();
+  else restoreModalFocus();
+}
+async function loadMe() {
+  try {
+    state.me = await api('/auth/me');
+    appShell();
+  } catch (err) {
+    if (err.status === 401) logout(false);
+    else renderLogin();
+  }
+}
+function pageHead(title, description, actions = '') {
+  return `<div class="page-heading"><div><h1>${title}</h1><p>${description}</p></div><div class="heading-actions">${actions}</div></div>`;
+}
+function stat(label, value, foot, iconName) {
+  return `<div class="stat"><span class="stat-icon">${icon(iconName)}</span><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-foot">${foot}</div></div>`;
+}
+function panel(title, body, action = '') {
+  return `<section class="panel"><div class="panel-head"><h2>${title}</h2>${action}</div><div class="panel-body">${body}</div></section>`;
+}
+function empty(text) {
+  return `<div class="empty">${text}</div>`;
+}
+function fmtQty(value) {
+  return new Intl.NumberFormat('en-PH', { maximumFractionDigits: 3 }).format(
+    Number(value || 0),
+  );
+}
+async function renderPage() {
+  const target = $('#content');
+  if (!target) return;
+  target.innerHTML = '<div class="skeleton">Loading your workspace…</div>';
+  try {
+    if (state.page === 'pos') return await renderPos(target);
+    if (state.page === 'history') return await renderHistory(target);
+    if (state.page === 'dashboard') return await renderDashboard(target);
+    if (state.page === 'catalog') return await renderCatalog(target);
+    if (state.page === 'inventory') return await renderInventory(target);
+    if (state.page === 'suppliers') return await renderSuppliers(target);
+    if (state.page === 'users') return await renderUsers(target);
+    if (state.page === 'reports') return await renderReports(target);
+    if (state.page === 'tax') return await renderTaxSettings(target);
+  } catch (err) {
+    const message =
+      Number(err.status) >= 500
+        ? 'We could not load this page. Please try again. If the problem continues, contact your administrator.'
+        : err.message;
+    target.innerHTML = `${pageHead(navItems.find((x) => x.id === state.page)?.label || 'Workspace', '')}<section class="panel"><div class="panel-body">${empty(esc(message))}<button class="btn secondary" data-action="reload">Try again</button></div></section>`;
+  }
+}
+function lotWarning(product) {
+  const lots = Array.isArray(product.lots) ? product.lots : [];
+  const soon = lots
+    .filter((l) => l.is_sellable && l.expires_on && Number(l.qty_on_hand) > 0)
+    .sort((a, b) => a.expires_on.localeCompare(b.expires_on))
+    .find((l) => isWithinExpiryWarning(l.expires_on, new Date(), 30));
+  if (soon) return `Expires ${dateFmt(soon.expires_on)}`;
+  if (lots.some((l) => !l.is_sellable && Number(l.qty_on_hand) > 0))
+    return 'Expired or inactive lots excluded';
   return '';
 }
-async function renderPos(root){
-  const request=state.searchSequence;const data=await api(`/products?q=${encodeURIComponent(state.filter)}`);if(request!==state.searchSequence)return;state.products=data.items||[];
-  const products=state.products,cart=state.cart,currency=cart[0]?.currency||products.find(p=>p.currency)?.currency||'PHP';
-  let cartQuote=null;if(cart.length){try{cartQuote=await api('/sales/quote',{method:'POST',body:{items:cart.map(p=>({product_id:p.id,quantity:Number(p.quantity)})),currency}});}catch{}}
-  const subtotal=Number(cartQuote?.subtotal||0), totalDue=Number(cartQuote?.total||0), discountTotal=Number(cartQuote?.discount_total||0), taxTotal=Number(cartQuote?.tax_total||0);
-  const productCards=products.map(p=>{const stock=Number(p.qty_sellable||0),low=stock>0&&stock<=5,note=lotWarning(p)||(p.expiry_warning?'Some stock expires within 30 days':'');return `<button class="product-card" data-add="${esc(p.id)}" ${!isSellableProduct(p)?'disabled':''}><span class="tag ${low?'warn':''}">${esc(p.sku)}</span><div class="product-name">${esc(p.name)}</div><div class="product-meta">${esc(p.item_type==='SERVICE'?'Service':(p.barcode||p.unit||'Clinic essential'))}</div><div class="product-price">${money(p.price,p.currency||currency)}</div><div class="product-stock ${stock<=0?'stock-out':low?'stock-low':''}">${stock<=0?'Out of stock':`${fmtQty(stock)} ${esc(p.unit||'units')} available`}</div>${note?`<div class="expiry-note ${note.startsWith('Expires')||note.startsWith('Some stock')?'warning':''}">${esc(note)}</div>`:''}</button>`;}).join('');
-  root.innerHTML=`${pageHead('Point of sale','Search products or scan a barcode to start a sale.')}<div class="split"><section><div class="panel"><div class="panel-head"><h2>Find a product</h2><span class="tag neutral">${products.length} results</span></div><div class="panel-body"><div class="search-row"><input class="search-input" data-search="products" value="${esc(state.filter)}" placeholder="Search name, SKU or scan barcode…" aria-label="Search products"><button class="btn secondary" data-action="clear-search">Clear</button></div><div class="product-grid" style="margin-top:15px">${products.length?productCards:empty(state.filter?'No matching products. Check the barcode or search another name.':'No active products yet.')}</div></div></div></section><section class="panel cart-panel"><div class="panel-head"><h2>Current sale</h2><button class="btn ghost small" data-action="clear-cart" ${cart.length?'':'disabled'}>Clear</button></div><div class="panel-body"><div class="cart-list">${cart.length?cart.map(item=>`<div class="cart-row"><div><div class="cart-row-name">${esc(item.name)}</div><div class="cart-row-meta">${esc(item.sku)} · ${money(item.price,item.currency)} each${item.sc_discount_eligible?' · Senior Citizen eligible':String()}${item.pwd_discount_eligible?' · PWD eligible':String()}</div><div class="qty-controls"><button data-qty="${esc(item.id)}" data-delta="-1" aria-label="Decrease quantity">−</button><input data-cart-qty="${esc(item.id)}" type="number" min="1" max="${Number(item.qty_sellable)}" value="${item.quantity}" aria-label="Quantity of ${esc(item.name)}"><button data-qty="${esc(item.id)}" data-delta="1" aria-label="Increase quantity" ${item.quantity>=Number(item.qty_sellable)?'disabled':''}>+</button><button class="btn ghost small" data-remove="${esc(item.id)}" style="margin-left:4px">Remove</button></div></div><div class="cart-line-price">${money(item.price*item.quantity,item.currency)}</div></div>`).join(''):empty('Your basket is empty. Add a product to begin.')}</div><div class="totals"><div class="total-row"><span>Subtotal</span><span>${money(subtotal,currency)}</span></div><div class="total-row"><span>Tax & discount</span><span>₱0.00</span></div><div class="total-row grand"><span>Total due</span><span>${money(subtotal,currency)}</span></div></div><button class="btn full" style="margin-top:12px" data-action="checkout" ${cart.length?'':'disabled'}>Continue to payment →</button><p class="subtle" style="font-size:10px;text-align:center;margin:10px 0 0">Stock is checked again when you complete the sale.</p></div></section></div>`;
-for(const product of products.filter(p=>p.item_type==="SERVICE")){const card=root.querySelector(`[data-add="${CSS.escape(product.id)}"]`);const stock=card?.querySelector(".product-stock");if(stock)stock.textContent="Service · no stock deduction";}if(cart.length){const rows=root.querySelectorAll('.totals .total-row');if(cartQuote){rows[0].lastElementChild.textContent=money(cartQuote.subtotal,currency);rows[1].firstElementChild.textContent='Discount';rows[1].lastElementChild.textContent=money(cartQuote.discount_total,currency);rows[1].insertAdjacentHTML('afterend',`<div class="total-row"><span>VAT</span><span>${money(cartQuote.tax_total,currency)}</span></div><div class="total-row"><span>VAT exempt / zero-rated</span><span>${money(cartQuote.lines.reduce((n,l)=>n+Number(l.vat_exempt_amount)+Number(l.zero_rated_amount),0),currency)}</span></div>`);root.querySelector('.totals .grand span:last-child').textContent=money(cartQuote.total,currency);}else{rows[1].firstElementChild.textContent='Tax configuration';rows[1].lastElementChild.textContent='Required';rows[2].lastElementChild.textContent='Unavailable';}}
-}async function checkoutModal(){const items=state.cart.map(p=>({product_id:p.id,quantity:Number(p.quantity)}));const currency=state.cart[0]?.currency||'PHP';try{state.checkoutQuote=await api('/sales/quote',{method:'POST',body:{items,currency}});}catch(err){notify(err.message,true);return;}state.modal=`<div class="modal-backdrop" data-action="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">Take payment</h2><button class="btn ghost small" data-action="close-modal" aria-label="Close">${icon('close')}</button></div><form id="checkout-form" class="modal-body"><div class="stat" style="text-align:center"><div class="stat-label">Amount due</div><div class="stat-value" id="checkout-total">${money(state.checkoutQuote.total,currency)}</div></div><div class="total-row"><span>Subtotal</span><span id="checkout-subtotal">${money(state.checkoutQuote.subtotal,currency)}</span></div><div class="total-row"><span>Discount</span><span id="checkout-discount">${money(state.checkoutQuote.discount_total,currency)}</span></div><div class="total-row"><span>VAT</span><span id="checkout-tax">${money(state.checkoutQuote.tax_total,currency)}</span></div><div class="total-row"><span>VAT exempt / zero-rated</span><span id="checkout-exempt">${money(Number(state.checkoutQuote.lines.reduce((n,l)=>n+Number(l.vat_exempt_amount)+Number(l.zero_rated_amount),0)),currency)}</span></div><div class="field"><label for="discount-type">Apply statutory discount</label><select name="discount_type" id="discount-type"><option value="">None</option><option value="SC">Senior Citizen</option><option value="PWD">PWD</option></select></div><div id="statutory-fields" hidden><div class="field"><label>Customer name</label><input name="statutory_customer_name" maxlength="200"></div><div class="field"><label>Senior Citizen / PWD ID number</label><input name="statutory_id_number" maxlength="100"></div><p class="subtle">Record only the ID details required for this invoice. Do not retain ID images.</p></div><div class="field"><label for="customer-name">Customer name <span class="subtle">(optional)</span></label><input name="customer_name" id="customer-name" maxlength="200" placeholder="Walk-in customer"></div><div id="tenders"><div class="payment-line"><div class="field"><label>Payment method</label><select name="method"><option value="CASH">Cash</option><option value="CARD">Card</option><option value="E_WALLET">E-wallet</option><option value="OTHER">Other</option></select></div><div class="field"><label>Amount</label><input name="amount" type="number" min="0.01" step="0.01" value="${Number(state.checkoutQuote.total).toFixed(2)}" required></div><button type="button" class="btn ghost small" data-action="remove-tender" aria-label="Remove tender" disabled>${icon('remove')}</button></div><div id="cash-change" class="total-row"></div></div><button type="button" class="btn secondary small" data-action="add-tender">+ Add another tender</button><div id="checkout-error" class="login-error" style="margin-top:10px"></div><div class="modal-actions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button><button type="submit" class="btn">Complete sale</button></div><p class="subtle" style="font-size:10px;margin:8px 0 0">Cash may exceed the total; change is calculated by the server. Other payment methods must match the amount due.</p></form></section></div>`;appShell();}
-async function refreshCheckoutQuote(form){const type=form.elements.discount_type.value;const fields=form.querySelector('#statutory-fields');fields.hidden=!type;for(const name of ['statutory_customer_name','statutory_id_number'])form.elements[name].required=Boolean(type);const items=state.cart.map(p=>({product_id:p.id,quantity:Number(p.quantity)}));const currency=state.cart[0]?.currency||'PHP';const old=Number(state.checkoutQuote?.total||0);const quote=await api('/sales/quote',{method:'POST',body:{items,currency,discount_type:type||null}});state.checkoutQuote=quote;const invalid=Boolean(type&&quote.statutory_discount_type!==type);const hasEligible=quote.lines.some(line=>line[type==='SC'?'sc_discount_eligible':'pwd_discount_eligible']);form.querySelector("[type=submit]").disabled=invalid;$("#checkout-error").textContent=invalid?(hasEligible?'An applicable promotion gives a lower payable amount for eligible items, so the statutory benefit does not apply.':('No '+(type==='SC'?'Senior Citizen':'PWD')+'-eligible items are currently in this sale.')):"";$('#checkout-total').textContent=money(quote.total,currency);$('#checkout-subtotal').textContent=money(quote.subtotal,currency);$('#checkout-discount').textContent=money(quote.discount_total,currency);$('#checkout-tax').textContent=money(quote.tax_total,currency);$('#checkout-exempt').textContent=money(quote.lines.reduce((n,l)=>n+Number(l.vat_exempt_amount)+Number(l.zero_rated_amount),0),currency);const tenders=[...form.querySelectorAll('[name="amount"]')];if(tenders.length===1&&Math.abs(Number(tenders[0].value)-old)<.005)tenders[0].value=Number(quote.total).toFixed(2);}
-async function completeCheckout(form){const items=state.cart.map(p=>({product_id:p.id,quantity:Number(p.quantity)}));const payments=[...form.querySelectorAll('.payment-line')].map(row=>({method:row.querySelector('[name=method]').value,amount:Number(row.querySelector('[name=amount]').value)}));assertTenderTotal(payments,Number(state.checkoutQuote.total));const type=form.elements.discount_type.value;const discount=type?{type,customer_name:form.elements.statutory_customer_name.value.trim(),id_number:form.elements.statutory_id_number.value.trim()}:undefined;const key=state.checkoutKey||(state.checkoutKey=crypto.randomUUID());const result=await api('/sales',{method:'POST',headers:{'Idempotency-Key':key},body:{items,payments,currency:state.cart[0]?.currency||'PHP',customer_name:form.elements.customer_name.value.trim()||undefined,discount}});const invoice=await api(`/sales/${result.id}/invoice`);state.checkoutKey=null;state.cart=[];state.modal=receiptModal(invoice);appShell();}
-function receiptModal(sale){state.lastSale=sale;return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title" tabindex="-1"><div class="modal-head"><h2 id="receipt-title">Invoice</h2><button class="btn ghost small" data-action="close-modal" aria-label="Close">${icon('close')}</button></div><div class="modal-body"><div class="receipt"><div class="brand" style="justify-content:center;font-size:14px"><span class="brand-mark">+</span>${esc(sale.tax_snapshot?.trade_name||sale.tax_snapshot?.registered_name||'')}</div><p>${esc(sale.tax_snapshot?.registered_name||"")}${sale.tax_snapshot?.trade_name?` · ${esc(sale.tax_snapshot.trade_name)}`:""}<br>${esc(sale.tax_snapshot?.registered_address||"")}${sale.tax_snapshot?.tin?`<br>${sale.tax_snapshot?.registration_type==='VAT_REGISTERED'?'VAT REG TIN':sale.tax_snapshot?.registration_type==='NON_VAT'?'NON-VAT REG TIN':'TIN'} ${esc(sale.tax_snapshot.tin)}`:""}${sale.tax_snapshot?.branch_code?` · Branch ${esc(sale.tax_snapshot.branch_code)}`:""}${sale.tax_snapshot?.permit_to_use_number?`<br>Permit to Use ${esc(sale.tax_snapshot.permit_to_use_number)}${sale.tax_snapshot.permit_to_use_date?` � ${esc(dateFmt(sale.tax_snapshot.permit_to_use_date))}`:""}`:""}${sale.tax_snapshot?.authority_to_print_number?`<br>Authority to Print ${esc(sale.tax_snapshot.authority_to_print_number)}${sale.tax_snapshot.authority_to_print_date?` � ${esc(dateFmt(sale.tax_snapshot.authority_to_print_date))}`:""}`:""}${sale.tax_snapshot?.approved_serial_numbers?`<br>Approved serials ${esc(sale.tax_snapshot.approved_serial_numbers)}`:""}</p><hr><div class="receipt-row"><span>Invoice number</span><strong>${esc(sale.invoice_number||sale.receipt_number||'')}</strong></div><div class="receipt-row"><span>Transaction reference</span><strong>${esc(sale.id||"")}</strong></div><div class="receipt-row"><span>Date</span><span>${esc(new Date(sale.created_at||Date.now()).toLocaleString('en-PH'))}</span></div><div class="receipt-row"><span>Cashier</span><span>${esc(sale.cashier?.display_name||state.me.display_name)}</span></div><hr>${(sale.items||[]).map(i=>`<div class="receipt-row"><span>${esc(i.name||i.name_snapshot)} × ${fmtQty(i.quantity)}<br><small>${money(i.unit_price,sale.currency)} each · ${esc(i.tax_classification||"Tax status pending")}</small>${Number(i.discount_amount||0)>0?`<br><small>${esc(i.discount_type||"Discount")} ${money(i.discount_amount,sale.currency)}</small>`:""}</span><strong>${money(i.line_total,sale.currency)}</strong></div>`).join('')}<hr><div class="receipt-row"><span>Subtotal</span><span>${money(sale.subtotal,sale.currency)}</span></div><div class="receipt-row"><span>Discount</span><span>${money(sale.discount_total,sale.currency)}</span></div><div class="receipt-row"><span>VAT</span><span>${money(sale.tax_total,sale.currency)}</span></div><div class="receipt-row"><span>VAT-exempt sales</span><span>${money(sale.vat_exempt_total,sale.currency)}</span></div><div class="receipt-row"><span>Zero-rated sales</span><span>${money(sale.zero_rated_total,sale.currency)}</span></div>${sale.statutory_customer?`<div class="receipt-row"><span>${sale.statutory_customer.type==="SC"?"Senior Citizen":sale.statutory_customer.type==="PWD"?"PWD":"Statutory-benefit"} customer</span><span>${esc(sale.statutory_customer.customer_name)} · ID ${esc(sale.statutory_customer.id_number)}</span></div><div class="receipt-row"><span>Beneficiary signature</span><span>________________________</span></div>`:""}<div class="receipt-row"><strong>Total due</strong><strong>${money(sale.total,sale.currency)}</strong></div>${(sale.payments||[]).map(p=>`<div class="receipt-row"><span>${esc(p.method)}</span><span>${money(p.tendered_amount??p.amount,sale.currency)}</span></div>`).join('')}${(sale.payments||[]).some(p=>p.change_amount!==null&&p.change_amount!==undefined)?`<div class="receipt-row"><span>Change</span><strong>${money((sale.payments||[]).reduce((n,p)=>n+Number(p.change_amount||0),0),sale.currency)}</strong></div>`:""}<hr><p>Thank you.</p></div><div class="modal-actions"><button class="btn ghost" data-action="close-modal">New sale</button><button class="btn secondary" data-action="print">Print invoice</button></div></div></section></div>`;}
-async function renderHistory(root){const data=await api(`/sales?limit=100${state.filter?`&q=${encodeURIComponent(state.filter)}`:''}`);state.history=(data.items||[]).filter(s=>isAdmin()||s.cashier_user_id===state.me.id);root.innerHTML=`${pageHead('Sales history','Find a completed sale and reopen its receipt.')}<section class="panel"><div class="panel-head"><h2>Recent transactions</h2><div class="search-row"><input class="search-input" data-search="sales" value="${esc(state.filter)}" placeholder="Search receipt number"><button class="btn secondary" data-action="search">Search</button></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Receipt</th><th>Date & time</th><th>Cashier</th><th>Status</th><th>Total</th><th></th></tr></thead><tbody>${state.history.length?state.history.map(s=>`<tr><td>${esc(s.receipt_number)}</td><td>${esc(new Date(s.created_at).toLocaleString('en-PH'))}</td><td>${esc(s.cashier_user_id===state.me.id?state.me.display_name:'Clinic staff')}</td><td><span class="tag ${s.status==='VOIDED'?'danger':''}">${esc(s.status)}</span></td><td>${money(s.total,s.currency)}</td><td><button class="btn secondary small" data-sale="${esc(s.id)}">View receipt</button></td></tr>`).join(''):`<tr><td colspan="6">${empty('No transactions found.')}</td></tr>`}</tbody></table></div></section>`;}
-async function renderDashboard(root){
-  const [products,sales,lots,expiring]=await Promise.all([api('/products'),api('/sales?limit=100'),api('/inventory/lots'),api('/inventory/expiring?days=30')]);
-  state.products=products.items||[];state.history=sales.items||[];state.lots=lots.items||[];
-  const low=state.products.filter(p=>Number(p.qty_sellable)<=5);
-  const today=new Date().toDateString();
-  const todays=state.history.filter(s=>new Date(s.created_at).toDateString()===today);
-  const value=todays.reduce((n,s)=>n+Number(s.total),0);
-  const recentRows=state.history.slice(0,6).map(s=>`<tr><td>${esc(s.receipt_number)}</td><td>${esc(new Date(s.created_at).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'}))}</td><td><span class="tag">${esc(s.status)}</span></td><td>${money(s.total,s.currency)}</td></tr>`).join('');
-  const recent=panel('Recent sales',`<div class="table-wrap"><table class="data-table"><thead><tr><th>Receipt</th><th>Time</th><th>Status</th><th>Total</th></tr></thead><tbody>${recentRows||'<tr><td colspan="4">No sales yet today.</td></tr>'}</tbody></table></div>`,'<button class="btn secondary small" data-nav="history">View all</button>');
-  const lowBody=low.length?low.slice(0,5).map(p=>`<div class="expiry-item"><div><strong>${esc(p.name)}</strong><br><span>${esc(p.sku)}</span></div><span class="tag ${Number(p.qty_sellable)===0?'danger':'warn'}">${fmtQty(p.qty_sellable)} left</span></div>`).join(''):empty('Stock levels look healthy.');
-  const expiringBody=expiring.items.length?`<div class="expiry-list">${expiring.items.slice(0,8).map(l=>`<div class="expiry-item"><div><strong>${esc(l.name)}</strong><br><span>Lot ${esc(l.lot_code)} · ${fmtQty(l.qty_on_hand)} available</span></div><span class="tag warn">${dateFmt(l.expires_on)}</span></div>`).join('')}</div>`:empty('No lots expiring within 30 days.');
-  root.innerHTML=`${pageHead(`Good ${new Date().getHours()<12?'morning':new Date().getHours()<18?'afternoon':'evening'}, ${esc((state.me.display_name||state.me.username).split(' ')[0])}`,'Here’s your clinic store at a glance.')}<div class="stats">${stat('Today’s sales',money(value),'Completed transactions','sales')}${stat('Transactions',todays.length,'Today so far','transactions')}${stat('Active products',state.products.length,'In the catalog','products')}${stat('Stock alerts',low.length+expiring.items.length,'Low stock or expiring soon','alerts')}</div><div class="split"><div>${recent}${panel('Low stock products',lowBody)}</div><div>${panel('Expiring in 30 days',expiringBody)}<div style="margin-top:15px">${panel('Quick action','<p class="subtle">Record incoming stock or a safe quantity correction.</p><button class="btn" data-nav="inventory">Manage inventory →</button>')}</div></div></div>`;
-}async function renderCatalog(root){const data=await api(`/products?q=${encodeURIComponent(state.filter)}`);state.products=data.items||[];root.innerHTML=`${pageHead('Products & prices','Keep product details, barcode and selling prices up to date.',`<button class="btn" data-action="new-product">+ Add product</button>`)}<section class="panel"><div class="panel-head"><h2>Product catalog</h2><div class="search-row"><input class="search-input" data-search="products" value="${esc(state.filter)}" placeholder="Search products or barcode"><button class="btn secondary" data-action="search">Search</button></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Product</th><th>SKU / Barcode</th><th>Price</th><th>On hand</th><th>Sellable</th><th>Availability</th><th></th></tr></thead><tbody>${state.products.length?state.products.map(p=>`<tr><td>${esc(p.name)}<br><span class="subtle">${esc(p.unit||'each')}</span></td><td>${esc(p.sku)}<br><span class="subtle">${esc(p.barcode||'No barcode')}</span></td><td>${money(p.price,p.currency)}</td><td>${fmtQty(p.qty_on_hand)}</td><td>${fmtQty(p.qty_sellable)}</td><td><span class="tag ${Number(p.qty_sellable)===0?'danger':Number(p.qty_sellable)<=5?'warn':''}">${Number(p.qty_sellable)===0?'Out of stock':Number(p.qty_sellable)<=5?'Low stock':'In stock'}</span></td><td><button class="btn secondary small" data-edit-product="${esc(p.id)}">Edit</button></td></tr>`).join(''):`<tr><td colspan="7">${empty('No products match your search.')}</td></tr>`}</tbody></table></div></section>`;}
-async function renderInventory(root){const [lots,suppliers,products,expiring]=await Promise.all([api('/inventory/lots'),api('/suppliers'),api('/products'),api('/inventory/expiring?days=30')]);state.lots=lots.items||[];state.suppliers=suppliers.items||[];state.products=products.items||[];root.innerHTML=`${pageHead('Inventory','Receive new lots, review expiry, and adjust stock safely.',`<button class="btn" data-action="new-receipt">+ Receive stock</button>`)}<div class="stats">${stat('Tracked lots',state.lots.length,'Active and historic lots','inventory')}${stat('Units on hand',fmtQty(state.lots.reduce((n,l)=>n+Number(l.qty_on_hand),0)),'Across all products','stock')}${stat('Expiring soon',expiring.items.length,'Within 30 days','alerts')}${stat('Products',state.products.length,'Active catalog','products')}</div><section class="panel"><div class="panel-head"><h2>Lots & expiry</h2><span class="tag neutral">${state.lots.length} records</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Product</th><th>Lot code</th><th>Supplier</th><th>Received</th><th>Expiry</th><th>On hand</th><th></th></tr></thead><tbody>${state.lots.length?state.lots.map(l=>`<tr><td>${esc(l.product_name)}<br><span class="subtle">${esc(l.sku)}</span></td><td>${esc(l.lot_code)}</td><td>${esc(l.supplier_name||'—')}</td><td>${fmtQty(l.qty_received)}</td><td>${dateFmt(l.expires_on)} ${l.expires_on&&new Date(l.expires_on)<new Date()?'<span class="tag danger">Expired</span>':''}</td><td>${fmtQty(l.qty_on_hand)}</td><td><button class="btn secondary small" data-adjust-lot="${esc(l.id)}">Adjust</button></td></tr>`).join(''):`<tr><td colspan="7">${empty('No inventory lots yet. Receive your first stock above.')}</td></tr>`}</tbody></table></div></section>`;}
-async function renderSuppliers(root){const data=await api('/suppliers');state.suppliers=data.items||[];root.innerHTML=`${pageHead('Suppliers','Maintain the clinic’s trusted stock partners.',`<button class="btn" data-action="new-supplier">+ Add supplier</button>`)}<section class="panel"><div class="panel-head"><h2>Supplier directory</h2><span class="tag neutral">${state.suppliers.length} active</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Supplier</th><th>Contact</th><th>Phone</th><th>Email</th><th></th></tr></thead><tbody>${state.suppliers.length?state.suppliers.map(s=>`<tr><td>${esc(s.name)}</td><td>${esc(s.contact_name||'—')}</td><td>${esc(s.phone||'—')}</td><td>${esc(s.email||'—')}</td><td><button class="btn secondary small" data-edit-supplier="${esc(s.id)}">Edit</button></td></tr>`).join(''):`<tr><td colspan="5">${empty('No suppliers yet.')}</td></tr>`}</tbody></table></div></section>`;}
-async function renderUsers(root){const data=await api('/users');state.users=data.items||[];root.innerHTML=`${pageHead('User access','Create staff accounts and manage clinic roles.',`<button class="btn" data-action="new-user">+ Add team member</button>`)}<section class="panel"><div class="panel-head"><h2>Clinic team</h2><span class="tag neutral">${state.users.length} accounts</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Team member</th><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>${state.users.map(u=>`<tr><td>${esc(u.display_name)}</td><td>${esc(u.username)}</td><td>${(u.roles||[]).map(r=>`<span class="tag ${r==='ADMIN'?'':'neutral'}">${esc(r)}</span>`).join(' ')}</td><td><span class="tag ${u.is_active?'':'danger'}">${u.is_active?'Active':'Inactive'}</span></td><td>${dateFmt(u.created_at)}</td><td><button class="btn secondary small" data-edit-user="${esc(u.id)}">Edit</button></td></tr>`).join('')||'<tr><td colspan="6">No users found.</td></tr>'}</tbody></table></div></section>`;}
-async function renderReports(root){
-  const range=[];if(state.reportFrom)range.push(`from=${encodeURIComponent(state.reportFrom)}`);if(state.reportTo)range.push(`to=${encodeURIComponent(state.reportTo)}`);
-  const query=range.length?`?${range.join('&')}`:'';
-  const movementQuery=range.length?`&${range.join('&')}`:'';
-  const [sales,stock,movements,logs]=await Promise.all([api(`/reports/sales${query}`),api('/reports/stock?expiring_days=30'),api(`/inventory/movements?limit=50${movementQuery}`),api('/audit-logs?limit=50')]);
-  const totals=sales.totals||[],byDay=sales.by_day||[],stockItems=stock.items||[],movementItems=movements.items||[],auditItems=logs.items||[];
-  const max=Math.max(1,...byDay.map(row=>Number(row.total)));
-  const salesBody=totals.length?totals.map(row=>`<div class="expiry-item"><div><strong>${esc(row.currency)}</strong><br><span>${fmtQty(row.completed_count)} completed · ${fmtQty(row.voided_count)} voided</span></div><strong>${money(row.completed_total,row.currency)}</strong></div>`).join(''):empty('No sales recorded in this date range.');
-  const transactionsBody=(sales.transactions||[]).length?'<div class="table-wrap"><table class="data-table"><thead><tr><th>Sale</th><th>When</th><th>Cashier</th><th>Method</th><th>Total</th><th>Tendered</th><th>Change</th></tr></thead><tbody>'+sales.transactions.map(t=>'<tr><td>'+esc(t.id)+'</td><td>'+esc(new Date(t.created_at).toLocaleString('en-PH'))+'</td><td>'+esc(t.cashier)+'</td><td>'+esc(t.payment_method||'Unrecorded')+'</td><td>'+money(t.total,t.currency)+'</td><td>'+(t.tendered_amount==null?'Not recorded':money(t.tendered_amount,t.currency))+'</td><td>'+(t.change_amount==null?'Not recorded':money(t.change_amount,t.currency))+'</td></tr>').join('')+'</tbody></table></div>':empty('No completed sales in this date range.');  const stockBody=stockItems.length?`<div class="table-wrap"><table class="data-table"><thead><tr><th>Product</th><th>On hand</th><th>Sellable</th><th>Expired</th><th>Expiring soon</th><th>Lots</th><th>Cost value</th></tr></thead><tbody>${stockItems.map(p=>`<tr><td>${esc(p.name)}<br><span class="subtle">${esc(p.sku)}</span></td><td>${fmtQty(p.qty_on_hand)}</td><td>${fmtQty(p.qty_sellable)}</td><td><span class="tag ${Number(p.qty_expired)>0?'danger':''}">${fmtQty(p.qty_expired)}</span></td><td><span class="tag ${Number(p.qty_expiring_soon)>0?'warn':''}">${fmtQty(p.qty_expiring_soon)}</span></td><td>${fmtQty(p.lot_count)}</td><td>${money(p.value_at_cost,'PHP')}</td></tr>`).join('')}</tbody></table></div>`:empty('No stock data returned.');
-  const movementBody=movementItems.length?`<div class="table-wrap"><table class="data-table"><thead><tr><th>When</th><th>Product / lot</th><th>Movement</th><th>Change</th><th>Reason</th><th>Actor</th></tr></thead><tbody>${movementItems.map(m=>`<tr><td>${esc(new Date(m.occurred_at).toLocaleString('en-PH'))}</td><td>${esc(m.product_name)}<br><span class="subtle">${esc(m.lot_code||'No lot')}</span></td><td>${esc(m.movement_type)}</td><td>${Number(m.quantity_delta)>0?'+':''}${fmtQty(m.quantity_delta)}</td><td>${esc(m.reason||'—')}</td><td>${esc(m.actor_username||'System')}</td></tr>`).join('')}</tbody></table></div>`:empty('No stock movements found.');
-  const dailyBody=byDay.length?byDay.map(row=>`<div style="margin-bottom:13px"><div class="total-row"><span>${esc(dateFmt(row.sale_date))} · ${esc(row.currency)} · ${fmtQty(row.sale_count)} sales</span><strong>${money(row.total,row.currency)}</strong></div><div class="metric-bar"><span style="width:${Math.max(3,Number(row.total)/max*100)}%"></span></div></div>`).join(''):empty('No completed sales in this date range.');
-  root.innerHTML=`${pageHead('Reports & audit','Review sales, stock, movements and recent system activity.')}<section class="panel" style="margin-bottom:16px"><div class="panel-body"><div class="search-row"><label class="field" style="margin:0">From <input type="date" data-report-date="from" value="${esc(state.reportFrom||'')}"></label><label class="field" style="margin:0">To <input type="date" data-report-date="to" value="${esc(state.reportTo||'')}"></label><button class="btn" data-action="refresh-reports">Apply dates</button><span class="subtle">Defaults to the last 30 days.</span></div></div></section><div class="stats">${stat('Products tracked',stockItems.length,'Current stock report','products')}${stat('Sales days',byDay.length,`${esc(sales.from||'')} to ${esc(sales.to||'')}`,'transactions')}${stat('Movements shown',movementItems.length,'Latest records','inventory')}${stat('Audit events',auditItems.length,'Recent records','history')}</div><div class="split"><div>${panel('Sales totals',salesBody)}<div style="margin-top:15px">${panel('Transaction tenders and change',transactionsBody)}</div><div style="margin-top:15px">${panel('Sales by day',dailyBody)}</div><div style="margin-top:15px">${panel('Stock by product',stockBody)}</div><div style="margin-top:15px">${panel('Inventory movements',movementBody)}</div></div><div>${panel('Recent audit activity',auditItems.length?`<div class="table-wrap"><table class="data-table"><thead><tr><th>Action</th><th>Entity</th><th>When</th></tr></thead><tbody>${auditItems.slice(0,15).map(l=>`<tr><td>${esc(l.action)}</td><td>${esc(l.entity_type)}</td><td>${esc(new Date(l.occurred_at).toLocaleString('en-PH'))}</td></tr>`).join('')}</tbody></table></div>`:empty('No audit events found.'))}<p class="subtle" style="font-size:10px;margin-top:12px">Sales dates apply to both report and movement filters. Stock totals use a 30-day expiry window.</p></div></div>`;
-}async function renderTaxSettings(root){const c=await api('/tax-configuration');root.innerHTML=`${pageHead('Tax and invoice settings','Configure only from the clinic’s registration records. Checkout stays disabled until a tax status is selected.')}<section class="panel"><div class="panel-body"><p>Current status: <strong>${esc(c.registration_type)}</strong>. Product classifications and discount eligibility are configured per product.</p><button class="btn" data-action="edit-tax">Configure business and tax details</button></div></section>`;}
-function taxForm(){api('/tax-configuration').then(c=>{formModal('Business and tax settings',`${inputField('Registration type','registration_type',c.registration_type,'text',{required:true,select:`<option value="UNCONFIGURED">Select from registration documents</option><option value="VAT_REGISTERED" ${c.registration_type==='VAT_REGISTERED'?'selected':''}>VAT registered</option><option value="NON_VAT" ${c.registration_type==='NON_VAT'?'selected':''}>Non-VAT registered</option><option value="VAT_EXEMPT" ${c.registration_type==='VAT_EXEMPT'?'selected':''}>VAT exempt</option>`})}${inputField('VAT rate (percent)','vat_rate_percent',Number(c.vat_rate_basis_points||0)/100,'number',{min:0,step:'0.01'})}${inputField('Selling price mode','pricing_mode',c.pricing_mode,'text',{required:true,select:`<option value="INCLUSIVE" ${c.pricing_mode==='INCLUSIVE'?'selected':''}>Tax inclusive</option><option value="EXCLUSIVE" ${c.pricing_mode==='EXCLUSIVE'?'selected':''}>Tax exclusive</option>`})}${inputField('Registered business name','registered_name',c.registered_name||'','text',{required:true,maxLength:200})}${inputField('Trade name','trade_name',c.trade_name||'','text',{maxLength:200})}${inputField('TIN','tin',c.tin||'','text',{required:true,maxLength:32})}${inputField('Branch code','branch_code',c.branch_code||'','text',{maxLength:32})}${inputField('Registered address','registered_address',c.registered_address||'','text',{required:true,maxLength:500,wide:true})}${inputField('Effective date','effective_from',c.effective_from||new Date().toISOString().slice(0,10),'date',{required:true})}${inputField('Permit to Use number','permit_to_use_number',c.permit_to_use_number||'','text',{maxLength:100})}${inputField('Permit issue date','permit_to_use_date',c.permit_to_use_date||'','date')}${inputField('Authority to Print number','authority_to_print_number',c.authority_to_print_number||'','text',{maxLength:100})}${inputField('Authority issue date','authority_to_print_date',c.authority_to_print_date||'','date')}${inputField('Approved serial numbers','approved_serial_numbers',c.approved_serial_numbers||'','text',{maxLength:500,wide:true})}`,'Save tax configuration',true);state.editing={type:'tax'};}).catch(err=>notify(err.message,true));}
-function formModal(title,body,submit='Save changes',wide=false){state.modal=`<div class="modal-backdrop" data-action="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-dialog-title" tabindex="-1"><div class="modal-head"><h2 id="edit-dialog-title">${title}</h2><button class="btn ghost small" data-action="close-modal" aria-label="Close">${icon('close')}</button></div><form id="edit-form" class="modal-body"><div class="form-grid ${wide?'wide':''}">${body}</div><div id="form-error" class="login-error"></div><div class="modal-actions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button><button type="submit" class="btn">${submit}</button></div></form></section></div>`;appShell();}
-const inputField=(label,name,value='',type='text',opts={})=>`<div class="field ${opts.wide?'wide':''}"><label for="f-${name}">${label}</label>${opts.select?`<select id="f-${name}" name="${name}" ${opts.required?'required':''}>${opts.select}</select>`:`<input id="f-${name}" name="${name}" type="${type}" value="${esc(value)}" ${opts.placeholder?`placeholder="${esc(opts.placeholder)}"`:''} ${opts.required?'required':''} ${opts.min!==undefined?`min="${opts.min}"`:''} ${opts.step?`step="${opts.step}"`:''} ${opts.minLength?`minlength="${opts.minLength}"`:''} ${opts.maxLength?`maxlength="${opts.maxLength}"`:''} ${opts.autocomplete?`autocomplete="${opts.autocomplete}"`:''} ${opts.disabled?'disabled':''}>`}</div>`;
-function itemTypeField(product){const selected=product?.item_type||'PRODUCT';return `<div class="field"><label for="f-item_type">Item type</label><select id="f-item_type" name="item_type"><option value="PRODUCT" ${selected==='PRODUCT'?'selected':''}>Product (stock tracked)</option><option value="SERVICE" ${selected==='SERVICE'?'selected':''}>Service (no stock deduction)</option></select></div>`;}
-function productForm(product){const existing=!!product;formModal(existing?'Edit product':'Add product',`${inputField('Product name','name',product?.name||'','text',{required:true,maxLength:200})}${inputField('SKU','sku',product?.sku||'','text',{required:!existing,maxLength:64,disabled:existing})}${inputField('Barcode','barcode',product?.barcode||'','text',{maxLength:128,disabled:existing})}${inputField('Unit','unit',product?.unit||'each','text',{required:!existing,maxLength:24,disabled:existing})}${inputField('Selling price','price',product?.price??'','number',{required:true,min:0,step:'0.01'})}${inputField('Currency','currency',product?.currency||'PHP','text',{required:true,maxLength:3})}${itemTypeField(product)}${inputField('Tax classification','tax_classification',product?.tax_classification||'UNCLASSIFIED','text',{required:true,select:`<option value="UNCLASSIFIED" ${product?.tax_classification==='UNCLASSIFIED'||!product?'selected':''}>Needs classification</option><option value="VATABLE" ${product?.tax_classification==='VATABLE'?'selected':''}>VATable</option><option value="VAT_EXEMPT" ${product?.tax_classification==='VAT_EXEMPT'?'selected':''}>VAT exempt</option><option value="ZERO_RATED" ${product?.tax_classification==='ZERO_RATED'?'selected':''}>Zero rated</option><option value="NON_VAT" ${product?.tax_classification==='NON_VAT'?'selected':''}>Non-VAT</option>`})}${inputField('Senior Citizen eligible','sc_discount_eligible',String(product?.sc_discount_eligible??false),'text',{select:`<option value="false" ${!product?.sc_discount_eligible?'selected':''}>No</option><option value="true" ${product?.sc_discount_eligible?'selected':''}>Yes</option>`})}${inputField('PWD eligible','pwd_discount_eligible',String(product?.pwd_discount_eligible??false),'text',{select:`<option value="false" ${!product?.pwd_discount_eligible?'selected':''}>No</option><option value="true" ${product?.pwd_discount_eligible?'selected':''}>Yes</option>`})}${inputField('Promotion discount percent','promotion_percent',Number(product?.promotion_basis_points||0)/100,'number',{min:0,max:100,step:'0.01'})}${inputField('Description','description',product?.description||'','text',{maxLength:2000,wide:true})}${existing?inputField('Status','is_active','','text',{select:`<option value="true" ${product.is_active?'selected':''}>Active</option><option value="false" ${!product.is_active?'selected':''}>Inactive</option>`}):''}`,existing?'Update product':'Create product');state.editing={type:'product',value:product};}
-function supplierForm(supplier){formModal(supplier?'Edit supplier':'Add supplier',`${inputField('Supplier name','name',supplier?.name||'','text',{required:true,maxLength:200})}${inputField('Contact name','contact_name',supplier?.contact_name||'','text',{maxLength:200})}${inputField('Phone','phone',supplier?.phone||'','tel',{maxLength:40})}${inputField('Email','email',supplier?.email||'','email',{maxLength:200})}`,supplier?'Update supplier':'Create supplier');state.editing={type:'supplier',value:supplier};}
-function userForm(user){const roles=user?.roles||['CASHIER'];formModal(user?'Edit team member':'Add team member',`${inputField('Display name','display_name',user?.display_name||'','text',{required:true,maxLength:200})}${inputField('Username','username',user?.username||'','text',{required:!user,maxLength:80,autocomplete:'username'})}${inputField(user?'New password (leave blank to keep)':'Password','password','','password',{required:!user,minLength:12,autocomplete:'new-password'})}${inputField('Role','role','','text',{select:`<option value="CASHIER" ${roles.includes('CASHIER')?'selected':''}>Cashier</option><option value="ADMIN" ${roles.includes('ADMIN')?'selected':''}>Admin</option>`})}${user?inputField('Account status','is_active','','text',{select:`<option value="true" ${user.is_active?'selected':''}>Active</option><option value="false" ${!user.is_active?'selected':''}>Inactive</option>`}):''}`,user?'Update access':'Create account');state.editing={type:'user',value:user};}
-function receiptForm(){const productOptions=state.products.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.sku)}</option>`).join('');const supplierOptions=`<option value="">No supplier</option>`+state.suppliers.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');formModal('Receive stock',`${inputField('Product','product_id','','text',{required:true,select:productOptions})}${inputField('Supplier','supplier_id','','text',{select:supplierOptions})}${inputField('Lot code','lot_code','','text',{required:true,maxLength:120})}${inputField('Expiry date','expires_on','','date')}${inputField('Quantity received','quantity','','number',{required:true,min:.001,step:'0.001'})}${inputField('Unit cost','unit_cost','','number',{required:true,min:0,step:'0.01'})}`,'Record receipt');state.editing={type:'receipt'};}
-function adjustmentForm(lot){formModal('Adjust lot quantity',`<div class="field wide"><label>Product and lot</label><input value="${esc(lot.product_name)} · ${esc(lot.lot_code)} · ${fmtQty(lot.qty_on_hand)} on hand" disabled></div>${inputField('Quantity change','quantity_delta','','number',{required:true,step:'0.001',placeholder:'Use a minus sign to remove stock'})}${inputField('Reason','reason','','text',{required:true,maxLength:500})}`,'Save adjustment');state.editing={type:'adjustment',value:lot};}
-function sameCurrency(item){if(state.cart.length&&state.cart[0].currency!==item.currency){notify('One sale can contain products in the same currency only.',true);return false;}return true;}
-function addProduct(productId){const product=state.products.find(p=>p.id===productId);if(!product)return;if(!isSellableProduct(product)){notify('This product is out of sellable stock.',true);return;}if(!sameCurrency(product))return;const current=state.cart.find(p=>p.id===product.id);if(current){if(current.quantity>=Number(product.qty_sellable)){notify(`Only ${fmtQty(product.qty_sellable)} available.`,true);return;}current.quantity++;}else state.cart.push({...product,quantity:1});state.checkoutKey=null;renderPos($('#content'));}
-function updateQty(id,quantity){const item=state.cart.find(x=>x.id===id);if(!item)return;if(quantity<=0){state.cart=state.cart.filter(x=>x.id!==id);}else{try{assertCartQuantity(quantity,item.qty_sellable);item.quantity=quantity;}catch(err){notify(err.message,true);}}
-state.checkoutKey=null;renderPos($('#content'));}
-async function handleClick(event){const target=event.target.closest('button,[data-action],[data-nav],[data-add],[data-qty],[data-remove],[data-sale],[data-edit-product],[data-edit-supplier],[data-edit-user],[data-adjust-lot]');if(!target)return;
-  if(target.dataset.nav){state.page=target.dataset.nav;state.filter='';$('#sidebar')?.classList.remove('open');appShell();return;}
-  if(target.dataset.add){addProduct(target.dataset.add);return;}if(target.dataset.qty){const item=state.cart.find(x=>x.id===target.dataset.qty);if(item)updateQty(item.id,item.quantity+Number(target.dataset.delta));return;}if(target.dataset.remove){state.cart=state.cart.filter(x=>x.id!==target.dataset.remove);state.checkoutKey=null;renderPos($('#content'));return;}
-  if(target.dataset.sale){try{const sale=await api(`/sales/${target.dataset.sale}/invoice`);state.modal=receiptModal({...sale,items:(sale.items||[]).map(i=>({...i,name:i.name||i.name_snapshot,sku:i.sku||i.sku_snapshot,line_total:i.line_total||Number(i.unit_price)*Number(i.quantity)}))});appShell();}catch(err){notify(err.message,true);}return;}
-  if(target.dataset.editProduct){const p=state.products.find(x=>x.id===target.dataset.editProduct)||await api(`/products?q=`);productForm(p);return;}if(target.dataset.editSupplier){supplierForm(state.suppliers.find(x=>x.id===target.dataset.editSupplier));return;}if(target.dataset.editUser){userForm(state.users.find(x=>x.id===target.dataset.editUser));return;}if(target.dataset.adjustLot){adjustmentForm(state.lots.find(x=>x.id===target.dataset.adjustLot));return;}
-  const action=target.dataset.action;switch(action){case'menu':$('#sidebar')?.classList.toggle('open');break;case'logout':logout();break;case'reload':renderPage();break;case'refresh-reports':state.reportFrom=$('[data-report-date="from"]')?.value||'';state.reportTo=$('[data-report-date="to"]')?.value||'';renderReports($('#content'));break;case'clear-search':state.filter='';renderPos($('#content'));break;case'search':{const field=$('[data-search]');if(field){state.filter=field.value.trim();renderPage();}break;}case'clear-cart':state.cart=[];state.checkoutKey=null;renderPos($('#content'));break;case'checkout':if(state.cart.length){checkoutModal();}break;case'close-modal':closeModal();break;case'modal-backdrop':if(event.target===target)closeModal();break;case'add-tender':{const box=$('#tenders');box.insertAdjacentHTML('beforeend',`<div class="payment-line"><div class="field"><label>Payment method</label><select name="method"><option value="CASH">Cash</option><option value="CARD">Card</option><option value="E_WALLET">E-wallet</option><option value="OTHER">Other</option></select></div><div class="field"><label>Amount</label><input name="amount" type="number" min="0.01" step="0.01" required></div><button type="button" class="btn danger small" data-action="remove-tender" aria-label="Remove tender">${icon('remove')}</button></div>`);break;}case'remove-tender':if($('.payment-line', $('#tenders'))&&$('#tenders').querySelectorAll('.payment-line').length>1)target.closest('.payment-line').remove();break;case'print':window.print();break;case'new-product':productForm(null);break;case'new-supplier':supplierForm(null);break;case'new-user':userForm(null);break;case'new-receipt':receiptForm();break;case'edit-tax':taxForm();break;}
+async function renderPos(root) {
+  const request = state.searchSequence;
+  const data = await api(`/products?q=${encodeURIComponent(state.filter)}`);
+  if (request !== state.searchSequence) return;
+  state.products = data.items || [];
+  const products = state.products,
+    cart = state.cart,
+    currency =
+      cart[0]?.currency || products.find((p) => p.currency)?.currency || 'PHP';
+  let cartQuote = null;
+  if (cart.length) {
+    try {
+      cartQuote = await api('/sales/quote', {
+        method: 'POST',
+        body: {
+          items: cart.map((p) => ({
+            product_id: p.id,
+            quantity: Number(p.quantity),
+          })),
+          currency,
+        },
+      });
+    } catch {}
+  }
+  const subtotal = Number(cartQuote?.subtotal || 0),
+    totalDue = Number(cartQuote?.total || 0),
+    discountTotal = Number(cartQuote?.discount_total || 0),
+    taxTotal = Number(cartQuote?.tax_total || 0);
+  const productCards = products
+    .map((p) => {
+      const stock = Number(p.qty_sellable || 0),
+        low = stock > 0 && stock <= 5,
+        note =
+          lotWarning(p) ||
+          (p.expiry_warning ? 'Some stock expires within 30 days' : '');
+      return `<button class="product-card" data-add="${esc(p.id)}" ${!isSellableProduct(p) ? 'disabled' : ''}><span class="tag ${low ? 'warn' : ''}">${esc(p.sku)}</span><div class="product-name">${esc(p.name)}</div><div class="product-meta">${esc(p.item_type === 'SERVICE' ? 'Service' : p.barcode || p.unit || 'Clinic essential')}</div><div class="product-price">${money(p.price, p.currency || currency)}</div><div class="product-stock ${stock <= 0 ? 'stock-out' : low ? 'stock-low' : ''}">${stock <= 0 ? 'Out of stock' : `${fmtQty(stock)} ${esc(p.unit || 'units')} available`}</div>${note ? `<div class="expiry-note ${note.startsWith('Expires') || note.startsWith('Some stock') ? 'warning' : ''}">${esc(note)}</div>` : ''}</button>`;
+    })
+    .join('');
+  root.innerHTML = `${pageHead('Point of sale', 'Search products or scan a barcode to start a sale.')}<div class="split"><section><div class="panel"><div class="panel-head"><h2>Find a product</h2><span class="tag neutral">${products.length} results</span></div><div class="panel-body"><div class="search-row"><input class="search-input" data-search="products" value="${esc(state.filter)}" placeholder="Search name, SKU or scan barcode…" aria-label="Search products"><button class="btn secondary" data-action="clear-search">Clear</button></div><div class="product-grid" style="margin-top:15px">${products.length ? productCards : empty(state.filter ? 'No matching products. Check the barcode or search another name.' : 'No active products yet.')}</div></div></div></section><section class="panel cart-panel"><div class="panel-head"><h2>Current sale</h2><button class="btn ghost small" data-action="clear-cart" ${cart.length ? '' : 'disabled'}>Clear</button></div><div class="panel-body"><div class="cart-list">${cart.length ? cart.map((item) => `<div class="cart-row"><div><div class="cart-row-name">${esc(item.name)}</div><div class="cart-row-meta">${esc(item.sku)} · ${money(item.price, item.currency)} each${item.sc_discount_eligible ? ' · Senior Citizen eligible' : String()}${item.pwd_discount_eligible ? ' · PWD eligible' : String()}</div><div class="qty-controls"><button data-qty="${esc(item.id)}" data-delta="-1" aria-label="Decrease quantity">−</button><input data-cart-qty="${esc(item.id)}" type="number" min="1" max="${Number(item.qty_sellable)}" value="${item.quantity}" aria-label="Quantity of ${esc(item.name)}"><button data-qty="${esc(item.id)}" data-delta="1" aria-label="Increase quantity" ${item.quantity >= Number(item.qty_sellable) ? 'disabled' : ''}>+</button><button class="btn ghost small" data-remove="${esc(item.id)}" style="margin-left:4px">Remove</button></div></div><div class="cart-line-price">${money(item.price * item.quantity, item.currency)}</div></div>`).join('') : empty('Your basket is empty. Add a product to begin.')}</div><div class="totals"><div class="total-row"><span>Subtotal</span><span>${money(subtotal, currency)}</span></div><div class="total-row"><span>Tax & discount</span><span>₱0.00</span></div><div class="total-row grand"><span>Total due</span><span>${money(subtotal, currency)}</span></div></div><button class="btn full" style="margin-top:12px" data-action="checkout" ${cart.length ? '' : 'disabled'}>Continue to payment →</button><p class="subtle" style="font-size:10px;text-align:center;margin:10px 0 0">Stock is checked again when you complete the sale.</p></div></section></div>`;
+  for (const product of products.filter((p) => p.item_type === 'SERVICE')) {
+    const card = root.querySelector(`[data-add="${CSS.escape(product.id)}"]`);
+    const stock = card?.querySelector('.product-stock');
+    if (stock) stock.textContent = 'Service · no stock deduction';
+  }
+  if (cart.length) {
+    const rows = root.querySelectorAll('.totals .total-row');
+    if (cartQuote) {
+      rows[0].lastElementChild.textContent = money(
+        cartQuote.subtotal,
+        currency,
+      );
+      rows[1].firstElementChild.textContent = 'Discount';
+      rows[1].lastElementChild.textContent = money(
+        cartQuote.discount_total,
+        currency,
+      );
+      rows[1].insertAdjacentHTML(
+        'afterend',
+        `<div class="total-row"><span>VAT</span><span>${money(cartQuote.tax_total, currency)}</span></div><div class="total-row"><span>VAT exempt / zero-rated</span><span>${money(
+          cartQuote.lines.reduce(
+            (n, l) =>
+              n + Number(l.vat_exempt_amount) + Number(l.zero_rated_amount),
+            0,
+          ),
+          currency,
+        )}</span></div>`,
+      );
+      root.querySelector('.totals .grand span:last-child').textContent = money(
+        cartQuote.total,
+        currency,
+      );
+    } else {
+      rows[1].firstElementChild.textContent = 'Tax configuration';
+      rows[1].lastElementChild.textContent = 'Required';
+      rows[2].lastElementChild.textContent = 'Unavailable';
+    }
+  }
 }
-async function handleSubmit(event){const form=event.target;if(form.id==='login-form')return;if(form.id==='checkout-form'){event.preventDefault();if(!beginCheckout(state))return;const button=form.querySelector('[type=submit]');const error=$('#checkout-error');error.textContent='';button.disabled=true;button.textContent='Processing…';try{await completeCheckout(form);}catch(err){error.textContent=err.message;button.disabled=false;button.textContent='Complete sale';}finally{endCheckout(state);}return;}if(form.id!=='edit-form')return;event.preventDefault();const button=form.querySelector('[type=submit]');const error=$('#form-error');button.disabled=true;error.textContent='';const values=Object.fromEntries(new FormData(form));try{const config=state.editing||{};if(config.type==='product'){const old=config.value;const payload={name:values.name,description:values.description||null,item_type:values.item_type,tax_classification:values.tax_classification,sc_discount_eligible:values.sc_discount_eligible==='true',pwd_discount_eligible:values.pwd_discount_eligible==='true',promotion_basis_points:Math.round(Number(values.promotion_percent||0)*100)};if(!old){Object.assign(payload,{sku:values.sku,barcode:values.barcode||null,unit:values.unit,price:Number(values.price),currency:values.currency.toUpperCase()});await api('/products',{method:'POST',body:payload});}else{Object.assign(payload,{is_active:values.is_active==='true'});const newPrice=Number(values.price);if(newPrice!==Number(old.price)||values.currency.toUpperCase()!==old.currency)Object.assign(payload,{price:newPrice,currency:values.currency.toUpperCase()});await api(`/products/${old.id}`,{method:'PATCH',body:payload});}}
-    if(config.type==='tax'){await api('/tax-configuration',{method:'PUT',body:{registration_type:values.registration_type,vat_rate_basis_points:Math.round(Number(values.vat_rate_percent||0)*100),pricing_mode:values.pricing_mode,registered_name:values.registered_name,trade_name:values.trade_name||null,tin:values.tin||null,branch_code:values.branch_code||null,registered_address:values.registered_address,effective_from:values.effective_from,permit_to_use_number:values.permit_to_use_number||null,permit_to_use_date:values.permit_to_use_date||null,authority_to_print_number:values.authority_to_print_number||null,authority_to_print_date:values.authority_to_print_date||null,approved_serial_numbers:values.approved_serial_numbers||null}});}
-    if(config.type==='supplier'){const payload={name:values.name,contact_name:values.contact_name||null,phone:values.phone||null,email:values.email||null};if(config.value)await api(`/suppliers/${config.value.id}`,{method:'PATCH',body:payload});else await api('/suppliers',{method:'POST',body:payload});}
-    if(config.type==='user'){const old=config.value;const roles=[values.role];if(!old){await api('/users',{method:'POST',body:{username:values.username,display_name:values.display_name,password:values.password,roles}});}else{const patch={display_name:values.display_name,is_active:values.is_active==='true'};if(values.password)patch.password=values.password;await api(`/users/${old.id}`,{method:'PATCH',body:patch});if((old.roles||[]).join()!==roles.join())await api(`/users/${old.id}/roles`,{method:'PUT',body:{roles}});}}
-    if(config.type==='receipt'){await api('/inventory/receipts',{method:'POST',body:{product_id:values.product_id,supplier_id:values.supplier_id||null,lot_code:values.lot_code,expires_on:values.expires_on||null,unit_cost:Number(values.unit_cost),quantity:Number(values.quantity)}});}
-    if(config.type==='adjustment'){const delta=Number(values.quantity_delta);if(!Number.isFinite(delta)||delta===0)throw new Error('Quantity change must be a non-zero number.');await api('/inventory/adjustments',{method:'POST',body:{lot_id:config.value.id,quantity_delta:delta,reason:values.reason}});}
-    state.modal=null;state.editing=null;notify(config.type==='receipt'?'Stock receipt saved.':config.type==='adjustment'?'Stock adjustment saved.':'Changes saved.');appShell();
-  }catch(err){error.textContent=err.message;button.disabled=false;}}
-function updateCashPreview(form){const box=form.querySelector('#cash-change');if(!box)return;const rows=[...form.querySelectorAll('.payment-line')];if(rows.length!==1||rows[0].querySelector('[name=method]').value!=='CASH'){box.textContent='';return;}const preview=cashChangePreview(rows[0].querySelector('[name=amount]').value,state.checkoutQuote.total);box.textContent=preview.sufficient?'CHANGE '+money(preview.changeCents/100,state.cart[0]?.currency||'PHP'):'Insufficient cash';}function handleInput(event){const field=event.target;if(field.form?.id==='checkout-form'&&(field.name==='amount'||field.name==='method'))updateCashPreview(field.form);if(field.dataset.search){state.filter=field.value;const sequence=++state.searchSequence;clearTimeout(state.searchTimer);state.searchTimer=setTimeout(()=>{const content=$('#content');if(state.page==='pos'){renderPos(content).then(()=>{if(sequence!==state.searchSequence)return;const replacement=$('[data-search="products"]');replacement?.focus();replacement?.setSelectionRange(state.filter.length,state.filter.length);});}},240);}}
-function handleChange(event){const field=event.target;if(field.form?.id==='checkout-form'&&(field.name==='amount'||field.name==='method'))updateCashPreview(field.form);if(field.id==='discount-type'){const form=field.form;refreshCheckoutQuote(form).catch(err=>{$('#checkout-error').textContent=err.message;});return;}if(field.dataset.cartQty){const value=Number(field.value);if(!Number.isInteger(value)||value<1){notify('Enter a quantity of at least one.',true);const item=state.cart.find(x=>x.id===field.dataset.cartQty);if(item)field.value=item.quantity;return;}updateQty(field.dataset.cartQty,value);}}
-async function start(){if(!state.access){renderLogin();return;}await loadMe();}
+async function checkoutModal() {
+  const items = state.cart.map((p) => ({
+    product_id: p.id,
+    quantity: Number(p.quantity),
+  }));
+  const currency = state.cart[0]?.currency || 'PHP';
+  try {
+    state.checkoutQuote = await api('/sales/quote', {
+      method: 'POST',
+      body: { items, currency },
+    });
+  } catch (err) {
+    notify(err.message, true);
+    return;
+  }
+  state.modal = `<div class="modal-backdrop" data-action="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">Take payment</h2><button class="btn ghost small" data-action="close-modal" aria-label="Close">${icon('close')}</button></div><form id="checkout-form" class="modal-body"><div class="stat" style="text-align:center"><div class="stat-label">Amount due</div><div class="stat-value" id="checkout-total">${money(state.checkoutQuote.total, currency)}</div></div><div class="total-row"><span>Subtotal</span><span id="checkout-subtotal">${money(state.checkoutQuote.subtotal, currency)}</span></div><div class="total-row"><span>Discount</span><span id="checkout-discount">${money(state.checkoutQuote.discount_total, currency)}</span></div><div class="total-row"><span>VAT</span><span id="checkout-tax">${money(state.checkoutQuote.tax_total, currency)}</span></div><div class="total-row"><span>VAT exempt / zero-rated</span><span id="checkout-exempt">${money(Number(state.checkoutQuote.lines.reduce((n, l) => n + Number(l.vat_exempt_amount) + Number(l.zero_rated_amount), 0)), currency)}</span></div><div class="field"><label for="discount-type">Apply statutory discount</label><select name="discount_type" id="discount-type"><option value="">None</option><option value="SC">Senior Citizen</option><option value="PWD">PWD</option></select></div><div id="statutory-fields" hidden><div class="field"><label>Customer name</label><input name="statutory_customer_name" maxlength="200"></div><div class="field"><label>Senior Citizen / PWD ID number</label><input name="statutory_id_number" maxlength="100"></div><p class="subtle">Record only the ID details required for this invoice. Do not retain ID images.</p></div><div class="field"><label for="customer-name">Customer name <span class="subtle">(optional)</span></label><input name="customer_name" id="customer-name" maxlength="200" placeholder="Walk-in customer"></div><div id="tenders"><div class="payment-line"><div class="field"><label>Payment method</label><select name="method"><option value="CASH">Cash</option><option value="CARD">Card</option><option value="E_WALLET">E-wallet</option><option value="OTHER">Other</option></select></div><div class="field"><label>Amount</label><input name="amount" type="number" min="0.01" step="0.01" value="${Number(state.checkoutQuote.total).toFixed(2)}" required></div><button type="button" class="btn ghost small" data-action="remove-tender" aria-label="Remove tender" disabled>${icon('remove')}</button></div><div id="cash-change" class="total-row"></div></div><button type="button" class="btn secondary small" data-action="add-tender">+ Add another tender</button><div id="checkout-error" class="login-error" style="margin-top:10px"></div><div class="modal-actions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button><button type="submit" class="btn">Complete sale</button></div><p class="subtle" style="font-size:10px;margin:8px 0 0">Cash may exceed the total; change is calculated by the server. Other payment methods must match the amount due.</p></form></section></div>`;
+  appShell();
+}
+async function refreshCheckoutQuote(form) {
+  const type = form.elements.discount_type.value;
+  const fields = form.querySelector('#statutory-fields');
+  fields.hidden = !type;
+  for (const name of ['statutory_customer_name', 'statutory_id_number'])
+    form.elements[name].required = Boolean(type);
+  const items = state.cart.map((p) => ({
+    product_id: p.id,
+    quantity: Number(p.quantity),
+  }));
+  const currency = state.cart[0]?.currency || 'PHP';
+  const old = Number(state.checkoutQuote?.total || 0);
+  const quote = await api('/sales/quote', {
+    method: 'POST',
+    body: { items, currency, discount_type: type || null },
+  });
+  state.checkoutQuote = quote;
+  const invalid = Boolean(type && quote.statutory_discount_type !== type);
+  const hasEligible = quote.lines.some(
+    (line) =>
+      line[type === 'SC' ? 'sc_discount_eligible' : 'pwd_discount_eligible'],
+  );
+  form.querySelector('[type=submit]').disabled = invalid;
+  $('#checkout-error').textContent = invalid
+    ? hasEligible
+      ? 'An applicable promotion gives a lower payable amount for eligible items, so the statutory benefit does not apply.'
+      : 'No ' +
+        (type === 'SC' ? 'Senior Citizen' : 'PWD') +
+        '-eligible items are currently in this sale.'
+    : '';
+  $('#checkout-total').textContent = money(quote.total, currency);
+  $('#checkout-subtotal').textContent = money(quote.subtotal, currency);
+  $('#checkout-discount').textContent = money(quote.discount_total, currency);
+  $('#checkout-tax').textContent = money(quote.tax_total, currency);
+  $('#checkout-exempt').textContent = money(
+    quote.lines.reduce(
+      (n, l) => n + Number(l.vat_exempt_amount) + Number(l.zero_rated_amount),
+      0,
+    ),
+    currency,
+  );
+  const tenders = [...form.querySelectorAll('[name="amount"]')];
+  if (tenders.length === 1 && Math.abs(Number(tenders[0].value) - old) < 0.005)
+    tenders[0].value = Number(quote.total).toFixed(2);
+}
+async function completeCheckout(form) {
+  const items = state.cart.map((p) => ({
+    product_id: p.id,
+    quantity: Number(p.quantity),
+  }));
+  const payments = [...form.querySelectorAll('.payment-line')].map((row) => ({
+    method: row.querySelector('[name=method]').value,
+    amount: Number(row.querySelector('[name=amount]').value),
+  }));
+  assertTenderTotal(payments, Number(state.checkoutQuote.total));
+  const type = form.elements.discount_type.value;
+  const discount = type
+    ? {
+        type,
+        customer_name: form.elements.statutory_customer_name.value.trim(),
+        id_number: form.elements.statutory_id_number.value.trim(),
+      }
+    : undefined;
+  const key = state.checkoutKey || (state.checkoutKey = crypto.randomUUID());
+  const result = await api('/sales', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': key },
+    body: {
+      items,
+      payments,
+      currency: state.cart[0]?.currency || 'PHP',
+      customer_name: form.elements.customer_name.value.trim() || undefined,
+      discount,
+    },
+  });
+  const invoice = await api(`/sales/${result.id}/invoice`);
+  state.checkoutKey = null;
+  state.cart = [];
+  state.modal = receiptModal(invoice);
+  appShell();
+}
+function receiptModal(sale) {
+  state.lastSale = sale;
+  return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title" tabindex="-1"><div class="modal-head"><h2 id="receipt-title">Invoice</h2><button class="btn ghost small" data-action="close-modal" aria-label="Close">${icon('close')}</button></div><div class="modal-body"><div class="receipt"><div class="brand" style="justify-content:center;font-size:14px"><span class="brand-mark">+</span>${esc(sale.tax_snapshot?.trade_name || sale.tax_snapshot?.registered_name || '')}</div><p>${esc(sale.tax_snapshot?.registered_name || '')}${sale.tax_snapshot?.trade_name ? ` · ${esc(sale.tax_snapshot.trade_name)}` : ''}<br>${esc(sale.tax_snapshot?.registered_address || '')}${sale.tax_snapshot?.tin ? `<br>${sale.tax_snapshot?.registration_type === 'VAT_REGISTERED' ? 'VAT REG TIN' : sale.tax_snapshot?.registration_type === 'NON_VAT' ? 'NON-VAT REG TIN' : 'TIN'} ${esc(sale.tax_snapshot.tin)}` : ''}${sale.tax_snapshot?.branch_code ? ` · Branch ${esc(sale.tax_snapshot.branch_code)}` : ''}${sale.tax_snapshot?.permit_to_use_number ? `<br>Permit to Use ${esc(sale.tax_snapshot.permit_to_use_number)}${sale.tax_snapshot.permit_to_use_date ? ` - ${esc(dateFmt(sale.tax_snapshot.permit_to_use_date))}` : ''}` : ''}${sale.tax_snapshot?.authority_to_print_number ? `<br>Authority to Print ${esc(sale.tax_snapshot.authority_to_print_number)}${sale.tax_snapshot.authority_to_print_date ? ` - ${esc(dateFmt(sale.tax_snapshot.authority_to_print_date))}` : ''}` : ''}${sale.tax_snapshot?.approved_serial_numbers ? `<br>Approved serials ${esc(sale.tax_snapshot.approved_serial_numbers)}` : ''}</p><hr><div class="receipt-row"><span>Invoice number</span><strong>${esc(sale.invoice_number || sale.receipt_number || '')}</strong></div><div class="receipt-row"><span>Transaction reference</span><strong>${esc(sale.id || '')}</strong></div><div class="receipt-row"><span>Date</span><span>${esc(new Date(sale.created_at || Date.now()).toLocaleString('en-PH'))}</span></div><div class="receipt-row"><span>Cashier</span><span>${esc(sale.cashier?.display_name || state.me.display_name)}</span></div><hr>${(sale.items || []).map((i) => `<div class="receipt-row"><span>${esc(i.name || i.name_snapshot)} × ${fmtQty(i.quantity)}<br><small>${money(i.unit_price, sale.currency)} each · ${esc(i.tax_classification || 'Tax status pending')}</small>${Number(i.discount_amount || 0) > 0 ? `<br><small>${esc(i.discount_type || 'Discount')} ${money(i.discount_amount, sale.currency)}</small>` : ''}</span><strong>${money(i.line_total, sale.currency)}</strong></div>`).join('')}<hr><div class="receipt-row"><span>Subtotal</span><span>${money(sale.subtotal, sale.currency)}</span></div><div class="receipt-row"><span>Discount</span><span>${money(sale.discount_total, sale.currency)}</span></div><div class="receipt-row"><span>VAT</span><span>${money(sale.tax_total, sale.currency)}</span></div><div class="receipt-row"><span>VAT-exempt sales</span><span>${money(sale.vat_exempt_total, sale.currency)}</span></div><div class="receipt-row"><span>Zero-rated sales</span><span>${money(sale.zero_rated_total, sale.currency)}</span></div>${sale.statutory_customer ? `<div class="receipt-row"><span>${sale.statutory_customer.type === 'SC' ? 'Senior Citizen' : sale.statutory_customer.type === 'PWD' ? 'PWD' : 'Statutory-benefit'} customer</span><span>${esc(sale.statutory_customer.customer_name)} · ID ${esc(sale.statutory_customer.id_number)}</span></div><div class="receipt-row"><span>Beneficiary signature</span><span>________________________</span></div>` : ''}<div class="receipt-row"><strong>Total due</strong><strong>${money(sale.total, sale.currency)}</strong></div>${(sale.payments || []).map((p) => `<div class="receipt-row"><span>${esc(p.method)}</span><span>${money(p.tendered_amount ?? p.amount, sale.currency)}</span></div>`).join('')}${
+    (sale.payments || []).some(
+      (p) => p.change_amount !== null && p.change_amount !== undefined,
+    )
+      ? `<div class="receipt-row"><span>Change</span><strong>${money(
+          (sale.payments || []).reduce(
+            (n, p) => n + Number(p.change_amount || 0),
+            0,
+          ),
+          sale.currency,
+        )}</strong></div>`
+      : ''
+  }<hr><p>Thank you.</p></div><div class="modal-actions"><button class="btn ghost" data-action="close-modal">New sale</button><button class="btn secondary" data-action="print">Print invoice</button></div></div></section></div>`;
+}
+async function renderHistory(root) {
+  const data = await api(
+    `/sales?limit=100${state.filter ? `&q=${encodeURIComponent(state.filter)}` : ''}`,
+  );
+  state.history = (data.items || []).filter(
+    (s) => isAdmin() || s.cashier_user_id === state.me.id,
+  );
+  root.innerHTML = `${pageHead('Sales history', 'Find a completed sale and reopen its receipt.')}<section class="panel"><div class="panel-head"><h2>Recent transactions</h2><div class="search-row"><input class="search-input" data-search="sales" value="${esc(state.filter)}" placeholder="Search receipt number"><button class="btn secondary" data-action="search">Search</button></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Receipt</th><th>Date & time</th><th>Cashier</th><th>Status</th><th>Total</th><th></th></tr></thead><tbody>${state.history.length ? state.history.map((s) => `<tr><td>${esc(s.receipt_number)}</td><td>${esc(new Date(s.created_at).toLocaleString('en-PH'))}</td><td>${esc(s.cashier_user_id === state.me.id ? state.me.display_name : 'Clinic staff')}</td><td><span class="tag ${s.status === 'VOIDED' ? 'danger' : ''}">${esc(s.status)}</span></td><td>${money(s.total, s.currency)}</td><td><button class="btn secondary small" data-sale="${esc(s.id)}">View receipt</button></td></tr>`).join('') : `<tr><td colspan="6">${empty('No transactions found.')}</td></tr>`}</tbody></table></div></section>`;
+}
+async function renderDashboard(root) {
+  const [products, sales, lots, expiring] = await Promise.all([
+    api('/products'),
+    api('/sales?limit=100'),
+    api('/inventory/lots'),
+    api('/inventory/expiring?days=30'),
+  ]);
+  state.products = products.items || [];
+  state.history = sales.items || [];
+  state.lots = lots.items || [];
+  const low = state.products.filter((p) => Number(p.qty_sellable) <= 5);
+  const today = new Date().toDateString();
+  const todays = state.history.filter(
+    (s) => new Date(s.created_at).toDateString() === today,
+  );
+  const value = todays.reduce((n, s) => n + Number(s.total), 0);
+  const recentRows = state.history
+    .slice(0, 6)
+    .map(
+      (s) =>
+        `<tr><td>${esc(s.receipt_number)}</td><td>${esc(new Date(s.created_at).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }))}</td><td><span class="tag">${esc(s.status)}</span></td><td>${money(s.total, s.currency)}</td></tr>`,
+    )
+    .join('');
+  const recent = panel(
+    'Recent sales',
+    `<div class="table-wrap"><table class="data-table"><thead><tr><th>Receipt</th><th>Time</th><th>Status</th><th>Total</th></tr></thead><tbody>${recentRows || '<tr><td colspan="4">No sales yet today.</td></tr>'}</tbody></table></div>`,
+    '<button class="btn secondary small" data-nav="history">View all</button>',
+  );
+  const lowBody = low.length
+    ? low
+        .slice(0, 5)
+        .map(
+          (p) =>
+            `<div class="expiry-item"><div><strong>${esc(p.name)}</strong><br><span>${esc(p.sku)}</span></div><span class="tag ${Number(p.qty_sellable) === 0 ? 'danger' : 'warn'}">${fmtQty(p.qty_sellable)} left</span></div>`,
+        )
+        .join('')
+    : empty('Stock levels look healthy.');
+  const expiringBody = expiring.items.length
+    ? `<div class="expiry-list">${expiring.items
+        .slice(0, 8)
+        .map(
+          (l) =>
+            `<div class="expiry-item"><div><strong>${esc(l.name)}</strong><br><span>Lot ${esc(l.lot_code)} · ${fmtQty(l.qty_on_hand)} available</span></div><span class="tag warn">${dateFmt(l.expires_on)}</span></div>`,
+        )
+        .join('')}</div>`
+    : empty('No lots expiring within 30 days.');
+  root.innerHTML = `${pageHead(`Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, ${esc((state.me.display_name || state.me.username).split(' ')[0])}`, 'Here’s your clinic store at a glance.')}<div class="stats">${stat('Today’s sales', money(value), 'Completed transactions', 'sales')}${stat('Transactions', todays.length, 'Today so far', 'transactions')}${stat('Active products', state.products.length, 'In the catalog', 'products')}${stat('Stock alerts', low.length + expiring.items.length, 'Low stock or expiring soon', 'alerts')}</div><div class="split"><div>${recent}${panel('Low stock products', lowBody)}</div><div>${panel('Expiring in 30 days', expiringBody)}<div style="margin-top:15px">${panel('Quick action', '<p class="subtle">Record incoming stock or a safe quantity correction.</p><button class="btn" data-nav="inventory">Manage inventory →</button>')}</div></div></div>`;
+}
+async function renderCatalog(root) {
+  const data = await api(`/products?q=${encodeURIComponent(state.filter)}`);
+  state.products = data.items || [];
+  root.innerHTML = `${pageHead('Products & prices', 'Keep product details, barcode and selling prices up to date.', `<button class="btn" data-action="new-product">+ Add product</button>`)}<section class="panel"><div class="panel-head"><h2>Product catalog</h2><div class="search-row"><input class="search-input" data-search="products" value="${esc(state.filter)}" placeholder="Search products or barcode"><button class="btn secondary" data-action="search">Search</button></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Product</th><th>SKU / Barcode</th><th>Price</th><th>On hand</th><th>Sellable</th><th>Availability</th><th></th></tr></thead><tbody>${state.products.length ? state.products.map((p) => `<tr><td>${esc(p.name)}<br><span class="subtle">${esc(p.unit || 'each')}</span></td><td>${esc(p.sku)}<br><span class="subtle">${esc(p.barcode || 'No barcode')}</span></td><td>${money(p.price, p.currency)}</td><td>${fmtQty(p.qty_on_hand)}</td><td>${fmtQty(p.qty_sellable)}</td><td><span class="tag ${Number(p.qty_sellable) === 0 ? 'danger' : Number(p.qty_sellable) <= 5 ? 'warn' : ''}">${Number(p.qty_sellable) === 0 ? 'Out of stock' : Number(p.qty_sellable) <= 5 ? 'Low stock' : 'In stock'}</span></td><td><button class="btn secondary small" data-edit-product="${esc(p.id)}">Edit</button></td></tr>`).join('') : `<tr><td colspan="7">${empty('No products match your search.')}</td></tr>`}</tbody></table></div></section>`;
+}
+async function renderInventory(root) {
+  const [lots, suppliers, products, expiring] = await Promise.all([
+    api('/inventory/lots'),
+    api('/suppliers'),
+    api('/products'),
+    api('/inventory/expiring?days=30'),
+  ]);
+  state.lots = lots.items || [];
+  state.suppliers = suppliers.items || [];
+  state.products = products.items || [];
+  root.innerHTML = `${pageHead('Inventory', 'Receive new lots, review expiry, and adjust stock safely.', `<button class="btn" data-action="new-receipt">+ Receive stock</button>`)}<div class="stats">${stat('Tracked lots', state.lots.length, 'Active and historic lots', 'inventory')}${stat('Units on hand', fmtQty(state.lots.reduce((n, l) => n + Number(l.qty_on_hand), 0)), 'Across all products', 'stock')}${stat('Expiring soon', expiring.items.length, 'Within 30 days', 'alerts')}${stat('Products', state.products.length, 'Active catalog', 'products')}</div><section class="panel"><div class="panel-head"><h2>Lots & expiry</h2><span class="tag neutral">${state.lots.length} records</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Product</th><th>Lot code</th><th>Supplier</th><th>Received</th><th>Expiry</th><th>On hand</th><th></th></tr></thead><tbody>${state.lots.length ? state.lots.map((l) => `<tr><td>${esc(l.product_name)}<br><span class="subtle">${esc(l.sku)}</span></td><td>${esc(l.lot_code)}</td><td>${esc(l.supplier_name || '—')}</td><td>${fmtQty(l.qty_received)}</td><td>${dateFmt(l.expires_on)} ${l.expires_on && new Date(l.expires_on) < new Date() ? '<span class="tag danger">Expired</span>' : ''}</td><td>${fmtQty(l.qty_on_hand)}</td><td><button class="btn secondary small" data-adjust-lot="${esc(l.id)}">Adjust</button></td></tr>`).join('') : `<tr><td colspan="7">${empty('No inventory lots yet. Receive your first stock above.')}</td></tr>`}</tbody></table></div></section>`;
+}
+async function renderSuppliers(root) {
+  const data = await api('/suppliers');
+  state.suppliers = data.items || [];
+  root.innerHTML = `${pageHead('Suppliers', 'Maintain the clinic’s trusted stock partners.', `<button class="btn" data-action="new-supplier">+ Add supplier</button>`)}<section class="panel"><div class="panel-head"><h2>Supplier directory</h2><span class="tag neutral">${state.suppliers.length} active</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Supplier</th><th>Contact</th><th>Phone</th><th>Email</th><th></th></tr></thead><tbody>${state.suppliers.length ? state.suppliers.map((s) => `<tr><td>${esc(s.name)}</td><td>${esc(s.contact_name || '—')}</td><td>${esc(s.phone || '—')}</td><td>${esc(s.email || '—')}</td><td><button class="btn secondary small" data-edit-supplier="${esc(s.id)}">Edit</button></td></tr>`).join('') : `<tr><td colspan="5">${empty('No suppliers yet.')}</td></tr>`}</tbody></table></div></section>`;
+}
+async function renderUsers(root) {
+  const data = await api('/users');
+  state.users = data.items || [];
+  root.innerHTML = `${pageHead('User access', 'Create staff accounts and manage clinic roles.', `<button class="btn" data-action="new-user">+ Add team member</button>`)}<section class="panel"><div class="panel-head"><h2>Clinic team</h2><span class="tag neutral">${state.users.length} accounts</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Team member</th><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr></thead><tbody>${state.users.map((u) => `<tr><td>${esc(u.display_name)}</td><td>${esc(u.username)}</td><td>${(u.roles || []).map((r) => `<span class="tag ${r === 'ADMIN' ? '' : 'neutral'}">${esc(r)}</span>`).join(' ')}</td><td><span class="tag ${u.is_active ? '' : 'danger'}">${u.is_active ? 'Active' : 'Inactive'}</span></td><td>${dateFmt(u.created_at)}</td><td><button class="btn secondary small" data-edit-user="${esc(u.id)}">Edit</button></td></tr>`).join('') || '<tr><td colspan="6">No users found.</td></tr>'}</tbody></table></div></section>`;
+}
+async function renderReports(root) {
+  const range = [];
+  if (state.reportFrom)
+    range.push(`from=${encodeURIComponent(state.reportFrom)}`);
+  if (state.reportTo) range.push(`to=${encodeURIComponent(state.reportTo)}`);
+  const query = range.length ? `?${range.join('&')}` : '',
+    movementQuery = range.length ? `&${range.join('&')}` : '';
+  const [sales, stock, movements, logs] = await Promise.all([
+    api(`/reports/sales${query}`),
+    api('/reports/stock?expiring_days=30'),
+    api(`/inventory/movements?limit=50${movementQuery}`),
+    api('/audit-logs?limit=50'),
+  ]);
+  const totals = sales.totals || [],
+    byDay = sales.by_day || [],
+    transactions = sales.transactions || [],
+    stockItems = stock.items || [],
+    movementItems = movements.items || [],
+    auditItems = logs.items || [];
+  const sum = (key) => totals.reduce((n, row) => n + Number(row[key] || 0), 0),
+    count = sum('completed_count'),
+    discount = sum('discount_total'),
+    tax = sum('tax_total');
+  const max = Math.max(1, ...byDay.map((r) => Number(r.total))),
+    low = stockItems.filter((p) => Number(p.qty_sellable) <= 5),
+    expired = stockItems.filter((p) => Number(p.qty_expired) > 0),
+    expiring = stockItems.filter((p) => Number(p.qty_expiring_soon) > 0),
+    units = stockItems.reduce((n, p) => n + Number(p.qty_on_hand || 0), 0),
+    value = stockItems.reduce((n, p) => n + Number(p.value_at_cost || 0), 0);
+  const currencyTotals =
+    totals
+      .map(
+        (r) =>
+          `<div class="report-kpi"><span class="stat-label">Sales - ${esc(r.currency)}</span><strong>${money(r.completed_total, r.currency)}</strong><span class="subtle">${fmtQty(r.completed_count)} completed - ${fmtQty(r.voided_count)} voided</span><span class="subtle">Average ${money(Number(r.completed_count) ? Number(r.completed_total) / Number(r.completed_count) : 0, r.currency)}</span></div>`,
+      )
+      .join('') || empty('No sales recorded in this date range.');
+  const daily = byDay.length
+    ? `<div class="chart-bars" role="list" aria-label="Sales by day">${byDay.map((r) => `<div class="chart-bar-item" role="listitem" title="${esc(dateFmt(r.sale_date))}: ${money(r.total, r.currency)}"><span class="chart-bar-value">${money(r.total, r.currency)}</span><span class="chart-bar" style="height:${Math.max(4, (Number(r.total) / max) * 100)}%"></span><span class="chart-bar-label">${esc(dateFmt(r.sale_date))}</span></div>`).join('')}</div>`
+    : empty('No completed sales in this date range.');
+  const tx = transactions.length
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>When</th><th>Cashier</th><th>Method</th><th>Total</th><th>Tendered</th><th>Change</th></tr></thead><tbody>${transactions.map((t) => `<tr><td>${esc(new Date(t.created_at).toLocaleString('en-PH'))}</td><td>${esc(t.cashier)}</td><td>${esc(t.payment_method || 'Unrecorded')}</td><td>${money(t.total, t.currency)}</td><td>${t.tendered_amount == null ? 'Not recorded' : money(t.tendered_amount, t.currency)}</td><td>${t.change_amount == null ? 'Not recorded' : money(t.change_amount, t.currency)}</td></tr>`).join('')}</tbody></table></div>`
+    : empty('No completed sales in this date range.');
+  const stockBody = stockItems.length
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Product</th><th>On hand</th><th>Sellable</th><th>Expired</th><th>Expiring soon</th><th>Lots</th><th>Cost value</th></tr></thead><tbody>${stockItems.map((p) => `<tr><td>${esc(p.name)}<br><span class="subtle">${esc(p.sku)}</span></td><td>${fmtQty(p.qty_on_hand)}</td><td>${fmtQty(p.qty_sellable)}</td><td>${fmtQty(p.qty_expired)}</td><td>${fmtQty(p.qty_expiring_soon)}</td><td>${fmtQty(p.lot_count)}</td><td>${money(p.value_at_cost, 'PHP')}</td></tr>`).join('')}</tbody></table></div>`
+    : empty('No stock data returned.');
+  const actions = {};
+  auditItems.forEach((l) => (actions[l.action] = (actions[l.action] || 0) + 1));
+  const top = Object.entries(actions)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5),
+    maxAction = Math.max(1, ...top.map((x) => x[1])),
+    today = new Date().toLocaleDateString('en-CA'),
+    todayCount = auditItems.filter(
+      (l) => new Date(l.occurred_at).toLocaleDateString('en-CA') === today,
+    ).length;
+  const actionBody = top.length
+    ? top
+        .map(
+          ([a, n]) =>
+            `<div class="audit-action"><strong>${esc(a)}</strong><span>${n} events</span><div class="metric-bar"><span style="width:${(n / maxAction) * 100}%"></span></div></div>`,
+        )
+        .join('')
+    : empty('No recent audit events.');
+  const auditBody = auditItems.length
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Entity</th><th>Details</th></tr></thead><tbody>${auditItems.map((l) => `<tr><td>${esc(new Date(l.occurred_at).toLocaleString('en-PH'))}</td><td>${esc(l.actor_user_id || 'System')}</td><td><span class="tag neutral">${esc(l.action)}</span></td><td>${esc(l.entity_type || '-')}</td><td>${esc(typeof l.details === 'string' ? l.details : JSON.stringify(l.details || {}))}</td></tr>`).join('')}</tbody></table></div>`
+    : empty('No audit events in the latest 50 records.');
+  const movementBody = movementItems.length
+    ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>When</th><th>Product / lot</th><th>Movement</th><th>Change</th><th>Reason</th><th>Actor</th></tr></thead><tbody>${movementItems.map((m) => `<tr><td>${esc(new Date(m.occurred_at).toLocaleString('en-PH'))}</td><td>${esc(m.product_name)} - ${esc(m.lot_code || 'No lot')}</td><td>${esc(m.movement_type)}</td><td>${fmtQty(m.quantity_delta)}</td><td>${esc(m.reason || '-')}</td><td>${esc(m.actor_username || 'System')}</td></tr>`).join('')}</tbody></table></div>`
+    : empty('No stock movements found.');
+  root.innerHTML = `${pageHead('Reports & audit', 'Business performance, inventory health and recent system activity.')}<section class="panel report-filters"><div class="panel-body"><div class="search-row"><label class="field">From <input type="date" data-report-date="from" value="${esc(state.reportFrom || '')}"></label><label class="field">To <input type="date" data-report-date="to" value="${esc(state.reportTo || '')}"></label><button class="btn" data-action="refresh-reports">Apply dates</button><span class="subtle">Sales and movements - defaults to the last 30 days</span></div></div></section><section class="report-section"><div class="section-title"><div><h2>Sales performance</h2><p>${esc(sales.from || '')} to ${esc(sales.to || '')}</p></div><span class="tag neutral">${fmtQty(count)} completed transactions</span></div><div class="report-kpis">${currencyTotals}<div class="report-kpi"><span class="stat-label">Discounts</span><strong>${totals.length === 1 ? money(discount, totals[0].currency) : 'By currency in sales totals'}</strong><span class="subtle">Recorded discounts</span></div><div class="report-kpi"><span class="stat-label">Tax</span><strong>${totals.length === 1 ? money(tax, totals[0].currency) : 'By currency in sales totals'}</strong><span class="subtle">Recorded tax</span></div></div></section><section class="report-section"><div class="section-title"><div><h2>Inventory health</h2><p>Current stock - expiring within ${fmtQty(stock.expiring_days || 30)} days</p></div></div><div class="stats report-inventory-stats">${stat('Products tracked', stockItems.length, 'Current stock report', 'products')}${stat('Units on hand', fmtQty(units), 'Across tracked products', 'stock')}${stat('Low stock', low.length, 'Five or fewer sellable units', 'alerts')}${stat('Expired / expiring', `${expired.length} / ${expiring.length}`, 'Products with affected stock', 'inventory')}${stat('Inventory at cost', money(value), 'PHP cost value', 'products')}</div></section><div class="report-layout"><div>${panel('Sales over time', daily)}<div class="report-spacer">${panel('Transactions - tender and change', tx)}</div><div class="report-spacer">${panel('Stock by product', stockBody)}</div><div class="report-spacer">${panel('Inventory movements', movementBody)}</div></div><aside>${panel('Audit overview', `<div class="audit-stats"><div><strong>${auditItems.length}</strong><span>Events in latest 50</span></div><div><strong>${todayCount}</strong><span>Events today</span></div><div><strong>${new Set(auditItems.map((l) => l.actor_user_id).filter(Boolean)).size}</strong><span>Users represented</span></div></div>`)}<div class="report-spacer">${panel('Top actions - latest 50', actionBody)}</div></aside></div><section class="report-section audit-log">${panel('Audit log - latest 50', auditBody)}<p class="subtle">Audit records include actor, action, entity, details and time. The API does not provide a success or failure status; counts describe the latest 50 records.</p></section>`;
+}
+async function renderTaxSettings(root) {
+  const c = await api('/tax-configuration');
+  root.innerHTML = `${pageHead('Tax and invoice settings', 'Configure only from the clinic’s registration records. Checkout stays disabled until a tax status is selected.')}<section class="panel"><div class="panel-body"><p>Current status: <strong>${esc(c.registration_type)}</strong>. Product classifications and discount eligibility are configured per product.</p><button class="btn" data-action="edit-tax">Configure business and tax details</button></div></section>`;
+}
+function taxForm() {
+  api('/tax-configuration')
+    .then((c) => {
+      formModal(
+        'Business and tax settings',
+        `${inputField('Registration type', 'registration_type', c.registration_type, 'text', { required: true, select: `<option value="UNCONFIGURED">Select from registration documents</option><option value="VAT_REGISTERED" ${c.registration_type === 'VAT_REGISTERED' ? 'selected' : ''}>VAT registered</option><option value="NON_VAT" ${c.registration_type === 'NON_VAT' ? 'selected' : ''}>Non-VAT registered</option><option value="VAT_EXEMPT" ${c.registration_type === 'VAT_EXEMPT' ? 'selected' : ''}>VAT exempt</option>` })}${inputField('VAT rate (percent)', 'vat_rate_percent', Number(c.vat_rate_basis_points || 0) / 100, 'number', { min: 0, step: '0.01' })}${inputField('Selling price mode', 'pricing_mode', c.pricing_mode, 'text', { required: true, select: `<option value="INCLUSIVE" ${c.pricing_mode === 'INCLUSIVE' ? 'selected' : ''}>Tax inclusive</option><option value="EXCLUSIVE" ${c.pricing_mode === 'EXCLUSIVE' ? 'selected' : ''}>Tax exclusive</option>` })}${inputField('Registered business name', 'registered_name', c.registered_name || '', 'text', { required: true, maxLength: 200 })}${inputField('Trade name', 'trade_name', c.trade_name || '', 'text', { maxLength: 200 })}${inputField('TIN', 'tin', c.tin || '', 'text', { required: true, maxLength: 32 })}${inputField('Branch code', 'branch_code', c.branch_code || '', 'text', { maxLength: 32 })}${inputField('Registered address', 'registered_address', c.registered_address || '', 'text', { required: true, maxLength: 500, wide: true })}${inputField('Effective date', 'effective_from', c.effective_from || new Date().toISOString().slice(0, 10), 'date', { required: true })}${inputField('Permit to Use number', 'permit_to_use_number', c.permit_to_use_number || '', 'text', { maxLength: 100 })}${inputField('Permit issue date', 'permit_to_use_date', c.permit_to_use_date || '', 'date')}${inputField('Authority to Print number', 'authority_to_print_number', c.authority_to_print_number || '', 'text', { maxLength: 100 })}${inputField('Authority issue date', 'authority_to_print_date', c.authority_to_print_date || '', 'date')}${inputField('Approved serial numbers', 'approved_serial_numbers', c.approved_serial_numbers || '', 'text', { maxLength: 500, wide: true })}`,
+        'Save tax configuration',
+        true,
+      );
+      state.editing = { type: 'tax' };
+    })
+    .catch((err) => notify(err.message, true));
+}
+function formModal(title, body, submit = 'Save changes', wide = false) {
+  state.modal = `<div class="modal-backdrop" data-action="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-dialog-title" tabindex="-1"><div class="modal-head"><h2 id="edit-dialog-title">${title}</h2><button class="btn ghost small" data-action="close-modal" aria-label="Close">${icon('close')}</button></div><form id="edit-form" class="modal-body"><div class="form-grid ${wide ? 'wide' : ''}">${body}</div><div id="form-error" class="login-error"></div><div class="modal-actions"><button type="button" class="btn ghost" data-action="close-modal">Cancel</button><button type="submit" class="btn">${submit}</button></div></form></section></div>`;
+  appShell();
+}
+const inputField = (label, name, value = '', type = 'text', opts = {}) =>
+  `<div class="field ${opts.wide ? 'wide' : ''}"><label for="f-${name}">${label}</label>${opts.select ? `<select id="f-${name}" name="${name}" ${opts.required ? 'required' : ''}>${opts.select}</select>` : `<input id="f-${name}" name="${name}" type="${type}" value="${esc(value)}" ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ''} ${opts.required ? 'required' : ''} ${opts.min !== undefined ? `min="${opts.min}"` : ''} ${opts.step ? `step="${opts.step}"` : ''} ${opts.minLength ? `minlength="${opts.minLength}"` : ''} ${opts.maxLength ? `maxlength="${opts.maxLength}"` : ''} ${opts.autocomplete ? `autocomplete="${opts.autocomplete}"` : ''} ${opts.disabled ? 'disabled' : ''}>`}</div>`;
+function itemTypeField(product) {
+  const selected = product?.item_type || 'PRODUCT';
+  return `<div class="field"><label for="f-item_type">Item type</label><select id="f-item_type" name="item_type"><option value="PRODUCT" ${selected === 'PRODUCT' ? 'selected' : ''}>Product (stock tracked)</option><option value="SERVICE" ${selected === 'SERVICE' ? 'selected' : ''}>Service (no stock deduction)</option></select></div>`;
+}
+function productForm(product) {
+  const existing = !!product;
+  formModal(
+    existing ? 'Edit product' : 'Add product',
+    `${inputField('Product name', 'name', product?.name || '', 'text', { required: true, maxLength: 200 })}${inputField('SKU', 'sku', product?.sku || '', 'text', { required: !existing, maxLength: 64, disabled: existing })}${inputField('Barcode', 'barcode', product?.barcode || '', 'text', { maxLength: 128, disabled: existing })}${inputField('Unit', 'unit', product?.unit || 'each', 'text', { required: !existing, maxLength: 24, disabled: existing })}${inputField('Selling price', 'price', product?.price ?? '', 'number', { required: true, min: 0, step: '0.01' })}${inputField('Currency', 'currency', product?.currency || 'PHP', 'text', { required: true, maxLength: 3 })}${itemTypeField(product)}${inputField('Tax classification', 'tax_classification', product?.tax_classification || 'UNCLASSIFIED', 'text', { required: true, select: `<option value="UNCLASSIFIED" ${product?.tax_classification === 'UNCLASSIFIED' || !product ? 'selected' : ''}>Needs classification</option><option value="VATABLE" ${product?.tax_classification === 'VATABLE' ? 'selected' : ''}>VATable</option><option value="VAT_EXEMPT" ${product?.tax_classification === 'VAT_EXEMPT' ? 'selected' : ''}>VAT exempt</option><option value="ZERO_RATED" ${product?.tax_classification === 'ZERO_RATED' ? 'selected' : ''}>Zero rated</option><option value="NON_VAT" ${product?.tax_classification === 'NON_VAT' ? 'selected' : ''}>Non-VAT</option>` })}${inputField('Senior Citizen eligible', 'sc_discount_eligible', String(product?.sc_discount_eligible ?? false), 'text', { select: `<option value="false" ${!product?.sc_discount_eligible ? 'selected' : ''}>No</option><option value="true" ${product?.sc_discount_eligible ? 'selected' : ''}>Yes</option>` })}${inputField('PWD eligible', 'pwd_discount_eligible', String(product?.pwd_discount_eligible ?? false), 'text', { select: `<option value="false" ${!product?.pwd_discount_eligible ? 'selected' : ''}>No</option><option value="true" ${product?.pwd_discount_eligible ? 'selected' : ''}>Yes</option>` })}${inputField('Promotion discount percent', 'promotion_percent', Number(product?.promotion_basis_points || 0) / 100, 'number', { min: 0, max: 100, step: '0.01' })}${inputField('Description', 'description', product?.description || '', 'text', { maxLength: 2000, wide: true })}${existing ? inputField('Status', 'is_active', '', 'text', { select: `<option value="true" ${product.is_active ? 'selected' : ''}>Active</option><option value="false" ${!product.is_active ? 'selected' : ''}>Inactive</option>` }) : ''}`,
+    existing ? 'Update product' : 'Create product',
+  );
+  state.editing = { type: 'product', value: product };
+}
+function supplierForm(supplier) {
+  formModal(
+    supplier ? 'Edit supplier' : 'Add supplier',
+    `${inputField('Supplier name', 'name', supplier?.name || '', 'text', { required: true, maxLength: 200 })}${inputField('Contact name', 'contact_name', supplier?.contact_name || '', 'text', { maxLength: 200 })}${inputField('Phone', 'phone', supplier?.phone || '', 'tel', { maxLength: 40 })}${inputField('Email', 'email', supplier?.email || '', 'email', { maxLength: 200 })}`,
+    supplier ? 'Update supplier' : 'Create supplier',
+  );
+  state.editing = { type: 'supplier', value: supplier };
+}
+function userForm(user) {
+  const roles = user?.roles || ['CASHIER'];
+  formModal(
+    user ? 'Edit team member' : 'Add team member',
+    `${inputField('Display name', 'display_name', user?.display_name || '', 'text', { required: true, maxLength: 200 })}${inputField('Username', 'username', user?.username || '', 'text', { required: !user, maxLength: 80, autocomplete: 'username' })}${inputField(user ? 'New password (leave blank to keep)' : 'Password', 'password', '', 'password', { required: !user, minLength: 12, autocomplete: 'new-password' })}${inputField('Role', 'role', '', 'text', { select: `<option value="CASHIER" ${roles.includes('CASHIER') ? 'selected' : ''}>Cashier</option><option value="ADMIN" ${roles.includes('ADMIN') ? 'selected' : ''}>Admin</option>` })}${user ? inputField('Account status', 'is_active', '', 'text', { select: `<option value="true" ${user.is_active ? 'selected' : ''}>Active</option><option value="false" ${!user.is_active ? 'selected' : ''}>Inactive</option>` }) : ''}`,
+    user ? 'Update access' : 'Create account',
+  );
+  state.editing = { type: 'user', value: user };
+}
+function receiptForm() {
+  const productOptions = state.products
+    .map(
+      (p) =>
+        `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.sku)}</option>`,
+    )
+    .join('');
+  const supplierOptions =
+    `<option value="">No supplier</option>` +
+    state.suppliers
+      .map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`)
+      .join('');
+  formModal(
+    'Receive stock',
+    `${inputField('Product', 'product_id', '', 'text', { required: true, select: productOptions })}${inputField('Supplier', 'supplier_id', '', 'text', { select: supplierOptions })}${inputField('Lot code', 'lot_code', '', 'text', { required: true, maxLength: 120 })}${inputField('Expiry date', 'expires_on', '', 'date')}${inputField('Quantity received', 'quantity', '', 'number', { required: true, min: 0.001, step: '0.001' })}${inputField('Unit cost', 'unit_cost', '', 'number', { required: true, min: 0, step: '0.01' })}`,
+    'Record receipt',
+  );
+  state.editing = { type: 'receipt' };
+}
+function adjustmentForm(lot) {
+  formModal(
+    'Adjust lot quantity',
+    `<div class="field wide"><label>Product and lot</label><input value="${esc(lot.product_name)} · ${esc(lot.lot_code)} · ${fmtQty(lot.qty_on_hand)} on hand" disabled></div>${inputField('Quantity change', 'quantity_delta', '', 'number', { required: true, step: '0.001', placeholder: 'Use a minus sign to remove stock' })}${inputField('Reason', 'reason', '', 'text', { required: true, maxLength: 500 })}`,
+    'Save adjustment',
+  );
+  state.editing = { type: 'adjustment', value: lot };
+}
+function sameCurrency(item) {
+  if (state.cart.length && state.cart[0].currency !== item.currency) {
+    notify('One sale can contain products in the same currency only.', true);
+    return false;
+  }
+  return true;
+}
+function addProduct(productId) {
+  const product = state.products.find((p) => p.id === productId);
+  if (!product) return;
+  if (!isSellableProduct(product)) {
+    notify('This product is out of sellable stock.', true);
+    return;
+  }
+  if (!sameCurrency(product)) return;
+  const current = state.cart.find((p) => p.id === product.id);
+  if (current) {
+    if (current.quantity >= Number(product.qty_sellable)) {
+      notify(`Only ${fmtQty(product.qty_sellable)} available.`, true);
+      return;
+    }
+    current.quantity++;
+  } else state.cart.push({ ...product, quantity: 1 });
+  state.checkoutKey = null;
+  renderPos($('#content'));
+}
+function updateQty(id, quantity) {
+  const item = state.cart.find((x) => x.id === id);
+  if (!item) return;
+  if (quantity <= 0) {
+    state.cart = state.cart.filter((x) => x.id !== id);
+  } else {
+    try {
+      assertCartQuantity(quantity, item.qty_sellable);
+      item.quantity = quantity;
+    } catch (err) {
+      notify(err.message, true);
+    }
+  }
+  state.checkoutKey = null;
+  renderPos($('#content'));
+}
+async function handleClick(event) {
+  const target = event.target.closest(
+    'button,[data-action],[data-nav],[data-add],[data-qty],[data-remove],[data-sale],[data-edit-product],[data-edit-supplier],[data-edit-user],[data-adjust-lot]',
+  );
+  if (!target) return;
+  if (target.dataset.nav) {
+    state.page = target.dataset.nav;
+    state.filter = '';
+    $('#sidebar')?.classList.remove('open');
+    appShell();
+    return;
+  }
+  if (target.dataset.add) {
+    addProduct(target.dataset.add);
+    return;
+  }
+  if (target.dataset.qty) {
+    const item = state.cart.find((x) => x.id === target.dataset.qty);
+    if (item) updateQty(item.id, item.quantity + Number(target.dataset.delta));
+    return;
+  }
+  if (target.dataset.remove) {
+    state.cart = state.cart.filter((x) => x.id !== target.dataset.remove);
+    state.checkoutKey = null;
+    renderPos($('#content'));
+    return;
+  }
+  if (target.dataset.sale) {
+    try {
+      const sale = await api(`/sales/${target.dataset.sale}/invoice`);
+      state.modal = receiptModal({
+        ...sale,
+        items: (sale.items || []).map((i) => ({
+          ...i,
+          name: i.name || i.name_snapshot,
+          sku: i.sku || i.sku_snapshot,
+          line_total: i.line_total || Number(i.unit_price) * Number(i.quantity),
+        })),
+      });
+      appShell();
+    } catch (err) {
+      notify(err.message, true);
+    }
+    return;
+  }
+  if (target.dataset.editProduct) {
+    const p =
+      state.products.find((x) => x.id === target.dataset.editProduct) ||
+      (await api(`/products?q=`));
+    productForm(p);
+    return;
+  }
+  if (target.dataset.editSupplier) {
+    supplierForm(
+      state.suppliers.find((x) => x.id === target.dataset.editSupplier),
+    );
+    return;
+  }
+  if (target.dataset.editUser) {
+    userForm(state.users.find((x) => x.id === target.dataset.editUser));
+    return;
+  }
+  if (target.dataset.adjustLot) {
+    adjustmentForm(state.lots.find((x) => x.id === target.dataset.adjustLot));
+    return;
+  }
+  const action = target.dataset.action;
+  switch (action) {
+    case 'menu':
+      $('#sidebar')?.classList.toggle('open');
+      break;
+    case 'logout':
+      logout();
+      break;
+    case 'reload':
+      renderPage();
+      break;
+    case 'refresh-reports':
+      state.reportFrom = $('[data-report-date="from"]')?.value || '';
+      state.reportTo = $('[data-report-date="to"]')?.value || '';
+      renderReports($('#content'));
+      break;
+    case 'clear-search':
+      state.filter = '';
+      renderPos($('#content'));
+      break;
+    case 'search': {
+      const field = $('[data-search]');
+      if (field) {
+        state.filter = field.value.trim();
+        renderPage();
+      }
+      break;
+    }
+    case 'clear-cart':
+      state.cart = [];
+      state.checkoutKey = null;
+      renderPos($('#content'));
+      break;
+    case 'checkout':
+      if (state.cart.length) {
+        checkoutModal();
+      }
+      break;
+    case 'close-modal':
+      closeModal();
+      break;
+    case 'modal-backdrop':
+      if (event.target === target) closeModal();
+      break;
+    case 'add-tender': {
+      const box = $('#tenders');
+      box.insertAdjacentHTML(
+        'beforeend',
+        `<div class="payment-line"><div class="field"><label>Payment method</label><select name="method"><option value="CASH">Cash</option><option value="CARD">Card</option><option value="E_WALLET">E-wallet</option><option value="OTHER">Other</option></select></div><div class="field"><label>Amount</label><input name="amount" type="number" min="0.01" step="0.01" required></div><button type="button" class="btn danger small" data-action="remove-tender" aria-label="Remove tender">${icon('remove')}</button></div>`,
+      );
+      break;
+    }
+    case 'remove-tender':
+      if (
+        $('.payment-line', $('#tenders')) &&
+        $('#tenders').querySelectorAll('.payment-line').length > 1
+      )
+        target.closest('.payment-line').remove();
+      break;
+    case 'print':
+      window.print();
+      break;
+    case 'new-product':
+      productForm(null);
+      break;
+    case 'new-supplier':
+      supplierForm(null);
+      break;
+    case 'new-user':
+      userForm(null);
+      break;
+    case 'new-receipt':
+      receiptForm();
+      break;
+    case 'edit-tax':
+      taxForm();
+      break;
+  }
+}
+async function handleSubmit(event) {
+  const form = event.target;
+  if (form.id === 'login-form') return;
+  if (form.id === 'checkout-form') {
+    event.preventDefault();
+    if (!beginCheckout(state)) return;
+    const button = form.querySelector('[type=submit]');
+    const error = $('#checkout-error');
+    error.textContent = '';
+    button.disabled = true;
+    button.textContent = 'Processing…';
+    try {
+      await completeCheckout(form);
+    } catch (err) {
+      error.textContent = err.message;
+      button.disabled = false;
+      button.textContent = 'Complete sale';
+    } finally {
+      endCheckout(state);
+    }
+    return;
+  }
+  if (form.id !== 'edit-form') return;
+  event.preventDefault();
+  const button = form.querySelector('[type=submit]');
+  const error = $('#form-error');
+  button.disabled = true;
+  error.textContent = '';
+  const values = Object.fromEntries(new FormData(form));
+  try {
+    const config = state.editing || {};
+    if (config.type === 'product') {
+      const old = config.value;
+      const payload = {
+        name: values.name,
+        description: values.description || null,
+        item_type: values.item_type,
+        tax_classification: values.tax_classification,
+        sc_discount_eligible: values.sc_discount_eligible === 'true',
+        pwd_discount_eligible: values.pwd_discount_eligible === 'true',
+        promotion_basis_points: Math.round(
+          Number(values.promotion_percent || 0) * 100,
+        ),
+      };
+      if (!old) {
+        Object.assign(payload, {
+          sku: values.sku,
+          barcode: values.barcode || null,
+          unit: values.unit,
+          price: Number(values.price),
+          currency: values.currency.toUpperCase(),
+        });
+        await api('/products', { method: 'POST', body: payload });
+      } else {
+        Object.assign(payload, { is_active: values.is_active === 'true' });
+        const newPrice = Number(values.price);
+        if (
+          newPrice !== Number(old.price) ||
+          values.currency.toUpperCase() !== old.currency
+        )
+          Object.assign(payload, {
+            price: newPrice,
+            currency: values.currency.toUpperCase(),
+          });
+        await api(`/products/${old.id}`, { method: 'PATCH', body: payload });
+      }
+    }
+    if (config.type === 'tax') {
+      await api('/tax-configuration', {
+        method: 'PUT',
+        body: {
+          registration_type: values.registration_type,
+          vat_rate_basis_points: Math.round(
+            Number(values.vat_rate_percent || 0) * 100,
+          ),
+          pricing_mode: values.pricing_mode,
+          registered_name: values.registered_name,
+          trade_name: values.trade_name || null,
+          tin: values.tin || null,
+          branch_code: values.branch_code || null,
+          registered_address: values.registered_address,
+          effective_from: values.effective_from,
+          permit_to_use_number: values.permit_to_use_number || null,
+          permit_to_use_date: values.permit_to_use_date || null,
+          authority_to_print_number: values.authority_to_print_number || null,
+          authority_to_print_date: values.authority_to_print_date || null,
+          approved_serial_numbers: values.approved_serial_numbers || null,
+        },
+      });
+    }
+    if (config.type === 'supplier') {
+      const payload = {
+        name: values.name,
+        contact_name: values.contact_name || null,
+        phone: values.phone || null,
+        email: values.email || null,
+      };
+      if (config.value)
+        await api(`/suppliers/${config.value.id}`, {
+          method: 'PATCH',
+          body: payload,
+        });
+      else await api('/suppliers', { method: 'POST', body: payload });
+    }
+    if (config.type === 'user') {
+      const old = config.value;
+      const roles = [values.role];
+      if (!old) {
+        await api('/users', {
+          method: 'POST',
+          body: {
+            username: values.username,
+            display_name: values.display_name,
+            password: values.password,
+            roles,
+          },
+        });
+      } else {
+        const patch = {
+          display_name: values.display_name,
+          is_active: values.is_active === 'true',
+        };
+        if (values.password) patch.password = values.password;
+        await api(`/users/${old.id}`, { method: 'PATCH', body: patch });
+        if ((old.roles || []).join() !== roles.join())
+          await api(`/users/${old.id}/roles`, {
+            method: 'PUT',
+            body: { roles },
+          });
+      }
+    }
+    if (config.type === 'receipt') {
+      await api('/inventory/receipts', {
+        method: 'POST',
+        body: {
+          product_id: values.product_id,
+          supplier_id: values.supplier_id || null,
+          lot_code: values.lot_code,
+          expires_on: values.expires_on || null,
+          unit_cost: Number(values.unit_cost),
+          quantity: Number(values.quantity),
+        },
+      });
+    }
+    if (config.type === 'adjustment') {
+      const delta = Number(values.quantity_delta);
+      if (!Number.isFinite(delta) || delta === 0)
+        throw new Error('Quantity change must be a non-zero number.');
+      await api('/inventory/adjustments', {
+        method: 'POST',
+        body: {
+          lot_id: config.value.id,
+          quantity_delta: delta,
+          reason: values.reason,
+        },
+      });
+    }
+    state.modal = null;
+    state.editing = null;
+    notify(
+      config.type === 'receipt'
+        ? 'Stock receipt saved.'
+        : config.type === 'adjustment'
+          ? 'Stock adjustment saved.'
+          : 'Changes saved.',
+    );
+    appShell();
+  } catch (err) {
+    error.textContent = err.message;
+    button.disabled = false;
+  }
+}
+function updateCashPreview(form) {
+  const box = form.querySelector('#cash-change');
+  if (!box) return;
+  const rows = [...form.querySelectorAll('.payment-line')];
+  if (
+    rows.length !== 1 ||
+    rows[0].querySelector('[name=method]').value !== 'CASH'
+  ) {
+    box.textContent = '';
+    return;
+  }
+  const preview = cashChangePreview(
+    rows[0].querySelector('[name=amount]').value,
+    state.checkoutQuote.total,
+  );
+  box.textContent = preview.sufficient
+    ? 'CHANGE ' +
+      money(preview.changeCents / 100, state.cart[0]?.currency || 'PHP')
+    : 'Insufficient cash';
+}
+function handleInput(event) {
+  const field = event.target;
+  if (
+    field.form?.id === 'checkout-form' &&
+    (field.name === 'amount' || field.name === 'method')
+  )
+    updateCashPreview(field.form);
+  if (field.dataset.search) {
+    state.filter = field.value;
+    const sequence = ++state.searchSequence;
+    clearTimeout(state.searchTimer);
+    state.searchTimer = setTimeout(() => {
+      const content = $('#content');
+      if (state.page === 'pos') {
+        renderPos(content).then(() => {
+          if (sequence !== state.searchSequence) return;
+          const replacement = $('[data-search="products"]');
+          replacement?.focus();
+          replacement?.setSelectionRange(
+            state.filter.length,
+            state.filter.length,
+          );
+        });
+      }
+    }, 240);
+  }
+}
+function handleChange(event) {
+  const field = event.target;
+  if (
+    field.form?.id === 'checkout-form' &&
+    (field.name === 'amount' || field.name === 'method')
+  )
+    updateCashPreview(field.form);
+  if (field.id === 'discount-type') {
+    const form = field.form;
+    refreshCheckoutQuote(form).catch((err) => {
+      $('#checkout-error').textContent = err.message;
+    });
+    return;
+  }
+  if (field.dataset.cartQty) {
+    const value = Number(field.value);
+    if (!Number.isInteger(value) || value < 1) {
+      notify('Enter a quantity of at least one.', true);
+      const item = state.cart.find((x) => x.id === field.dataset.cartQty);
+      if (item) field.value = item.quantity;
+      return;
+    }
+    updateQty(field.dataset.cartQty, value);
+  }
+}
+async function start() {
+  if (!state.access) {
+    renderLogin();
+    return;
+  }
+  await loadMe();
+}
 start();
-
-
-
-
